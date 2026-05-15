@@ -1,0 +1,10 @@
+[build]
+target = "index.html"
+public_url = "/"
+
+[watch]
+ignore = []
+
+[serve]
+port = 8080
+open = false
