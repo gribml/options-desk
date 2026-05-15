@@ -11,7 +11,7 @@ A personal options portfolio manager compiled to WebAssembly. Runs entirely in t
 ## Tech
 
 - [Leptos](https://leptos.dev) 0.8 (Rust → WASM, client-side rendering)
-- [Trunk](https://trunkrs.dev) for building and dev server
+- [Trunk](https://trunk-rs.github.io/trunk/) for building and dev server
 - [Supabase](https://supabase.com) for auth and data persistence (positions, scenarios)
 - Tailwind CSS (CDN)
 
