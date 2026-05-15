@@ -1,4 +1,3 @@
-use gloo_storage::Storage as _;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -28,10 +27,8 @@ pub fn LoginPage() -> impl IntoView {
         spawn_local(async move {
             match supabase::login(&e, &p).await {
                 Ok(resp) => {
-                    gloo_storage::LocalStorage::set("sb_token", &resp.access_token).ok();
-                    gloo_storage::LocalStorage::set("sb_user_id", &resp.user.id).ok();
-                    auth.token.set(Some(resp.access_token));
-                    auth.user_id.set(Some(resp.user.id));
+                    auth.apply_session(resp);
+                    auth.start_refresh_loop();
                     let win = web_sys::window().unwrap();
                     win.location().set_href("/portfolio").ok();
                 }

@@ -1,98 +1,108 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use chrono::{NaiveDate, Utc};
 use leptos::prelude::*;
+use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::api::supabase;
 use crate::app::AuthState;
 use crate::models::{
-    option::OptionType,
-    position::{Position, PositionKind},
-    scenario::{LegResult, Scenario, ScenarioResult},
+    option::{OptionSpec, OptionType},
+    position::Position,
+    scenario::{
+        AssignmentEvent, Scenario, ScenarioGreeks, ScenarioMarketInput, ScenarioResult,
+        ScenarioTrade, TradeDirection, TradeResult,
+    },
 };
 use crate::pricing::black_scholes::BsInputs;
 
-// ── Scenario evaluation ───────────────────────────────────────────────────────
+// ── Evaluation ────────────────────────────────────────────────────────────────
 
-fn evaluate_scenario(positions: &[Position], scenario: &Scenario) -> ScenarioResult {
-    let price_map = scenario.price_map();
+fn evaluate(scenario: &Scenario, positions: &[Position]) -> ScenarioResult {
     let eval_date = scenario.evaluation_date;
-    let rate = 0.05_f64;
+    let mut trade_results: Vec<TradeResult> = vec![];
+    let mut assignments: Vec<AssignmentEvent> = vec![];
+    let mut net_cash = 0.0f64;
+    let mut st_gain = 0.0f64;
+    let mut lt_gain = 0.0f64;
 
-    let mut legs: Vec<LegResult> = Vec::new();
+    for t in &scenario.trades {
+        let cf = t.cash_flow();
+        let rg = t.realized_gain();
+        let lt = t.is_long_term(eval_date);
+        net_cash += cf;
+        if let Some(g) = rg {
+            if lt { lt_gain += g; } else { st_gain += g; }
+        }
+        trade_results.push(TradeResult { label: t.label.clone(), cash_flow: cf, realized_gain: rg, is_long_term: lt });
+    }
 
     for pos in positions {
-        let assumed_price = match price_map.get(&pos.symbol) {
-            Some(&p) => p,
-            None => continue,
+        let spec = match &pos.option_spec { Some(s) => s, None => continue };
+        if pos.quantity >= 0 { continue; }
+        if eval_date < spec.expiry { continue; }
+        let price = match scenario.price_for(&pos.symbol) { Some(p) => p, None => continue };
+        let intrinsic = match spec.option_type {
+            OptionType::Call => price - spec.strike,
+            OptionType::Put  => spec.strike - price,
         };
-
-        let (mark_value, description) = match &pos.kind {
-            PositionKind::Stock => {
-                let mv = assumed_price * pos.quantity as f64;
-                let desc = format!("{} stock ×{:+}", pos.symbol, pos.quantity);
-                (mv, desc)
-            }
-            PositionKind::Option => {
-                let spec = match &pos.option_spec {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let t = (spec.expiry - eval_date).num_days().max(0) as f64 / 365.0;
-                let mark = if t <= 0.0 {
-                    match spec.option_type {
-                        OptionType::Call => (assumed_price - spec.strike).max(0.0),
-                        OptionType::Put => (spec.strike - assumed_price).max(0.0),
-                    }
-                } else {
-                    BsInputs {
-                        spot: assumed_price,
-                        strike: spec.strike,
-                        expiry_years: t,
-                        vol: 0.25,
-                        rate,
-                    }
-                    .price(spec.option_type)
-                };
-                let mv = mark * pos.quantity as f64 * 100.0;
-                let desc = format!(
-                    "{} {} ${:.0} {} ×{:+}",
-                    pos.symbol,
-                    spec.option_type.label(),
-                    spec.strike,
-                    spec.expiry.format("%d-%b-%y"),
-                    pos.quantity,
-                );
-                (mv, desc)
-            }
+        if intrinsic <= 0.0 { continue; }
+        let contracts = pos.quantity.unsigned_abs();
+        let option_pnl = (pos.cost_basis - intrinsic) * contracts as f64 * 100.0;
+        let stock_cf = match spec.option_type {
+            OptionType::Call =>  spec.strike * contracts as f64 * 100.0,
+            OptionType::Put  => -spec.strike * contracts as f64 * 100.0,
         };
-
-        let cost = pos.total_cost();
-        let pnl = mark_value - cost;
-        let days_held = (eval_date - pos.opened_at.date_naive()).num_days();
-        let (lt, st) = if pnl > 0.0 && days_held > 365 { (pnl, 0.0) } else { (0.0, pnl) };
-
-        legs.push(LegResult {
-            description,
-            pnl,
-            short_term_gain: st,
-            long_term_gain: lt,
+        let lt = (eval_date - pos.opened_at.date_naive()).num_days() > 365;
+        net_cash += stock_cf;
+        if lt { lt_gain += option_pnl; } else { st_gain += option_pnl; }
+        assignments.push(AssignmentEvent {
+            description: format!("Assignment: {} short {} ${:.0} {} ×{}",
+                pos.symbol, spec.option_type.label(), spec.strike,
+                spec.expiry.format("%d-%b-%y"), contracts),
+            option_pnl, is_long_term: lt, stock_cash_flow: stock_cf,
+            option_type: spec.option_type, strike: spec.strike, contracts,
         });
     }
 
-    let total_pnl = legs.iter().map(|l| l.pnl).sum();
-    let total_st = legs.iter().map(|l| l.short_term_gain).sum();
-    let total_lt = legs.iter().map(|l| l.long_term_gain).sum();
-
-    ScenarioResult {
-        evaluated_at: Utc::now(),
-        evaluation_date: eval_date,
-        legs,
-        total_pnl,
-        total_short_term: total_st,
-        total_long_term: total_lt,
+    let mut greeks = ScenarioGreeks::default();
+    for pos in positions {
+        let qty = pos.quantity as f64;
+        match &pos.option_spec {
+            None => { greeks.delta += qty; }
+            Some(spec) => {
+                let mi = match scenario.market_inputs.iter().find(|m| m.symbol == pos.symbol) {
+                    Some(m) => m, None => continue,
+                };
+                let t = (spec.expiry - eval_date).num_days().max(0) as f64 / 365.0;
+                if t <= 0.0 { continue; }
+                let r = BsInputs { spot: mi.price, strike: spec.strike, expiry_years: t, vol: mi.vol, rate: mi.rate }
+                    .greeks(spec.option_type);
+                let m = qty * 100.0;
+                greeks.delta += r.delta * m; greeks.gamma += r.gamma * m;
+                greeks.vega  += r.vega  * m; greeks.theta += r.theta * m; greeks.rho += r.rho * m;
+            }
+        }
     }
+
+    ScenarioResult { evaluated_at: Utc::now(), trade_results, assignments, net_cash,
+        total_st_gain: st_gain, total_lt_gain: lt_gain, greeks }
+}
+
+// ── B-S price helper ──────────────────────────────────────────────────────────
+
+fn bs_price(spec: &OptionSpec, mi: &ScenarioMarketInput, eval_date: NaiveDate) -> Option<f64> {
+    let t = (spec.expiry - eval_date).num_days().max(0) as f64 / 365.0;
+    if t <= 0.0 {
+        return Some(match spec.option_type {
+            OptionType::Call => (mi.price - spec.strike).max(0.0),
+            OptionType::Put  => (spec.strike - mi.price).max(0.0),
+        });
+    }
+    Some(BsInputs { spot: mi.price, strike: spec.strike, expiry_years: t, vol: mi.vol, rate: mi.rate }
+        .price(spec.option_type))
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────
@@ -100,30 +110,28 @@ fn evaluate_scenario(positions: &[Position], scenario: &Scenario) -> ScenarioRes
 #[component]
 pub fn ScenariosPage() -> impl IntoView {
     let auth = use_context::<AuthState>().expect("AuthState missing");
-    let scenarios = RwSignal::new(Vec::<Scenario>::new());
-    let positions = RwSignal::new(Vec::<Position>::new());
-    let loading = RwSignal::new(true);
-    let show_new = RwSignal::new(false);
+    let scenarios  = RwSignal::new(Vec::<Scenario>::new());
+    let positions  = RwSignal::new(Vec::<Position>::new());
+    let loading    = RwSignal::new(true);
+    let fetch_err  = RwSignal::new(Option::<String>::None);
+    let show_new   = RwSignal::new(false);
+    let show_archived = RwSignal::new(false);
+    let editing_id = RwSignal::new(Option::<Uuid>::None);
 
-    let auth_for_load = auth.clone();
     Effect::new(move |_| {
-        let token = auth_for_load.token.get();
-        let user_id = auth_for_load.user_id.get();
+        let token = auth.token.get();
+        let user_id = auth.user_id.get();
         if let (Some(tok), Some(uid)) = (token, user_id) {
-            let tok2 = tok.clone();
-            let uid2 = uid.clone();
+            let tok2 = tok.clone(); let uid2 = uid.clone();
             spawn_local(async move {
-                if let Ok(s) = supabase::fetch_scenarios(&tok, &uid).await {
-                    scenarios.set(s);
+                match supabase::fetch_scenarios(&tok, &uid).await {
+                    Ok(s)  => scenarios.set(s),
+                    Err(e) => fetch_err.set(Some(e)),
                 }
-                if let Ok(p) = supabase::fetch_positions(&tok2, &uid2).await {
-                    positions.set(p);
-                }
+                if let Ok(p) = supabase::fetch_positions(&tok2, &uid2).await { positions.set(p); }
                 loading.set(false);
             });
-        } else {
-            loading.set(false);
-        }
+        } else { loading.set(false); }
     });
 
     view! {
@@ -132,225 +140,752 @@ pub fn ScenariosPage() -> impl IntoView {
                 <h1 class="text-xl font-semibold">"Scenarios"</h1>
                 <button
                     class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
-                    on:click=move |_| show_new.update(|v| *v = !*v)
+                    on:click=move |_| {
+                        editing_id.set(None);
+                        show_new.update(|v| *v = !*v);
+                    }
                 >
-                    {move || if show_new.get() { "Cancel" } else { "+ New scenario" }}
+                    {move || if show_new.get() || editing_id.get().is_some() { "Cancel" } else { "+ New scenario" }}
                 </button>
             </div>
 
-            {move || show_new.get().then(|| {
-                let auth2 = auth.clone();
-                view! {
-                    <NewScenarioForm
-                        auth=auth2
-                        on_created=move |s: Scenario| {
-                            scenarios.update(|ss| ss.insert(0, s));
-                            show_new.set(false);
-                        }
-                    />
-                }
+            // New scenario form
+            {move || (show_new.get() && editing_id.get().is_none()).then(|| view! {
+                <ScenarioForm
+                    auth=auth
+                    positions=positions.get()
+                    existing=None
+                    on_saved=move |s: Scenario| {
+                        scenarios.update(|ss| ss.insert(0, s));
+                        show_new.set(false);
+                    }
+                    on_cancel=move || show_new.set(false)
+                />
             })}
 
             {move || loading.get().then(|| view! {
                 <p class="text-gray-400 text-sm">"Loading…"</p>
             })}
 
-            {move || scenarios.get().into_iter().map(|s| {
+            {move || fetch_err.get().map(|e| view! {
+                <p class="text-red-400 text-sm">"Failed to load scenarios: " {e}</p>
+            })}
+
+            // Active scenarios
+            {move || {
+                let ss = scenarios.get();
                 let ps = positions.get();
-                let result = evaluate_scenario(&ps, &s);
-                view! { <ScenarioCard scenario=s result=result /> }
-            }).collect_view()}
+                let eid = editing_id.get();
+                let active: Vec<_> = ss.into_iter().filter(|s| !s.archived).collect();
+                if !loading.get() && active.is_empty() && fetch_err.get().is_none() {
+                    view! { <p class="text-gray-500 text-sm">"No scenarios yet. Create one above."</p> }.into_any()
+                } else {
+                    active.into_iter().map(|s| {
+                        let id = s.id;
+                        if eid == Some(id) {
+                            let pos = ps.clone();
+                            view! {
+                                <ScenarioForm
+                                    auth=auth positions=pos existing=Some(s)
+                                    on_saved=move |updated: Scenario| {
+                                        scenarios.update(|ss| {
+                                            if let Some(e) = ss.iter_mut().find(|x| x.id == updated.id) { *e = updated; }
+                                        });
+                                        editing_id.set(None);
+                                    }
+                                    on_cancel=move || editing_id.set(None)
+                                />
+                            }.into_any()
+                        } else {
+                            let result = evaluate(&s, &ps);
+                            view! {
+                                <ScenarioCard scenario=s result=result auth=auth all_scenarios=scenarios
+                                    on_edit=move || { show_new.set(false); editing_id.set(Some(id)); }
+                                />
+                            }.into_any()
+                        }
+                    }).collect_view().into_any()
+                }
+            }}
+
+            // Archived section
+            {move || {
+                let n = scenarios.get().iter().filter(|s| s.archived).count();
+                (n > 0).then(|| view! {
+                    <div class="space-y-3 pt-2 border-t border-border">
+                        <button
+                            class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                            on:click=move |_| show_archived.update(|v| *v = !*v)
+                        >
+                            {move || {
+                                let n = scenarios.get().iter().filter(|s| s.archived).count();
+                                if show_archived.get() { format!("▴ Hide archived ({})", n) }
+                                else { format!("▾ Show archived ({})", n) }
+                            }}
+                        </button>
+                        {move || show_archived.get().then(|| {
+                            let ss = scenarios.get();
+                            let ps = positions.get();
+                            let eid = editing_id.get();
+                            ss.into_iter().filter(|s| s.archived).map(|s| {
+                                let id = s.id;
+                                if eid == Some(id) {
+                                    let pos = ps.clone();
+                                    view! {
+                                        <ScenarioForm
+                                            auth=auth positions=pos existing=Some(s)
+                                            on_saved=move |updated: Scenario| {
+                                                scenarios.update(|ss| {
+                                                    if let Some(e) = ss.iter_mut().find(|x| x.id == updated.id) { *e = updated; }
+                                                });
+                                                editing_id.set(None);
+                                            }
+                                            on_cancel=move || editing_id.set(None)
+                                        />
+                                    }.into_any()
+                                } else {
+                                    let result = evaluate(&s, &ps);
+                                    view! {
+                                        <ScenarioCard scenario=s result=result auth=auth all_scenarios=scenarios
+                                            on_edit=move || { editing_id.set(Some(id)); }
+                                        />
+                                    }.into_any()
+                                }
+                            }).collect_view()
+                        })}
+                    </div>
+                })
+            }}
         </div>
     }
 }
 
-// ── New scenario form ─────────────────────────────────────────────────────────
+// ── Scenario form (create + edit) ─────────────────────────────────────────────
 
-#[component]
-fn NewScenarioForm(
-    auth: AuthState,
-    on_created: impl Fn(Scenario) + 'static,
-) -> impl IntoView {
-    let on_created = Rc::new(on_created);
-    let name = RwSignal::new(String::new());
-    let eval_date = RwSignal::new(String::new());
-    let assumptions = RwSignal::new(vec![
-        (RwSignal::new(String::new()), RwSignal::new(String::new())),
-    ]);
-    let err = RwSignal::new(Option::<String>::None);
-    let saving = RwSignal::new(false);
+#[derive(Clone)]
+struct TradeEntry {
+    id: Uuid,
+    label: RwSignal<String>,
+    symbol: RwSignal<String>,
+    direction: RwSignal<TradeDirection>,
+    contracts: RwSignal<String>,
+    price: RwSignal<String>,
+    is_option: RwSignal<bool>,
+    opt_type: RwSignal<OptionType>,
+    strike: RwSignal<String>,
+    expiry: RwSignal<String>,
+    closes_id: RwSignal<Option<Uuid>>,
+}
 
-    let add_assumption = move |_: web_sys::MouseEvent| {
-        assumptions.update(|v| {
-            v.push((RwSignal::new(String::new()), RwSignal::new(String::new())));
-        });
-    };
+impl TradeEntry {
+    fn new() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            label: RwSignal::new(String::new()),
+            symbol: RwSignal::new(String::new()),
+            direction: RwSignal::new(TradeDirection::Buy),
+            contracts: RwSignal::new("1".to_string()),
+            price: RwSignal::new(String::new()),
+            is_option: RwSignal::new(true),
+            opt_type: RwSignal::new(OptionType::Call),
+            strike: RwSignal::new(String::new()),
+            expiry: RwSignal::new(String::new()),
+            closes_id: RwSignal::new(None),
+        }
+    }
 
-    let on_submit = move |ev: web_sys::SubmitEvent| {
-        ev.prevent_default();
-        let n = name.get().trim().to_string();
-        if n.is_empty() { err.set(Some("Name required.".into())); return; }
-        let ed = match NaiveDate::parse_from_str(eval_date.get().trim(), "%Y-%m-%d") {
-            Ok(d) => d,
-            Err(_) => { err.set(Some("Evaluation date must be YYYY-MM-DD.".into())); return; }
+    fn from_trade(t: &ScenarioTrade) -> Self {
+        Self {
+            id: t.id,
+            label: RwSignal::new(t.label.clone()),
+            symbol: RwSignal::new(t.symbol.clone()),
+            direction: RwSignal::new(t.direction),
+            contracts: RwSignal::new(t.contracts.to_string()),
+            price: RwSignal::new(format!("{}", t.price)),
+            is_option: RwSignal::new(t.option_spec.is_some()),
+            opt_type: RwSignal::new(t.option_spec.as_ref().map(|s| s.option_type).unwrap_or(OptionType::Call)),
+            strike: RwSignal::new(t.option_spec.as_ref().map(|s| format!("{}", s.strike)).unwrap_or_default()),
+            expiry: RwSignal::new(t.option_spec.as_ref().map(|s| s.expiry.format("%Y-%m-%d").to_string()).unwrap_or_default()),
+            closes_id: RwSignal::new(t.closes_position_id),
+        }
+    }
+
+    fn to_trade(&self, positions: &[Position]) -> Result<ScenarioTrade, String> {
+        let sym = self.symbol.get().trim().to_uppercase();
+        if sym.is_empty() { return Err("Symbol required".into()); }
+        let qty: u32 = self.contracts.get().trim().parse().map_err(|_| "Invalid contracts")?;
+        let price: f64 = self.price.get().trim().parse().map_err(|_| "Invalid price")?;
+
+        let option_spec = if self.is_option.get() {
+            let s: f64 = self.strike.get().trim().parse().map_err(|_| "Invalid strike")?;
+            let exp = NaiveDate::parse_from_str(self.expiry.get().trim(), "%Y-%m-%d")
+                .map_err(|_| "Expiry must be YYYY-MM-DD")?;
+            Some(OptionSpec { symbol: sym.clone(), option_type: self.opt_type.get(), strike: s, expiry: exp })
+        } else { None };
+
+        let (closes_position_id, closes_cost_basis, closes_is_long, closes_opened_at) =
+            if let Some(pid) = self.closes_id.get() {
+                if let Some(p) = positions.iter().find(|p| p.id == pid) {
+                    (Some(pid), Some(p.cost_basis), Some(p.quantity > 0), Some(p.opened_at.date_naive()))
+                } else { (None, None, None, None) }
+            } else { (None, None, None, None) };
+
+        let label = {
+            let l = self.label.get();
+            if l.trim().is_empty() {
+                format!("{} {} {}", self.direction.get().label(), sym,
+                    if self.is_option.get() { "option" } else { "stock" })
+            } else { l }
         };
 
-        let mut scenario = Scenario::new(&n, ed);
-        for (sym_sig, price_sig) in assumptions.get() {
-            let sym = sym_sig.get().trim().to_uppercase();
-            let price: f64 = match price_sig.get().trim().parse() {
-                Ok(p) => p,
-                Err(_) => { err.set(Some(format!("Invalid price for {}", sym))); return; }
-            };
-            if !sym.is_empty() {
-                scenario.price_assumptions.push(crate::models::scenario::PriceAssumption {
-                    symbol: sym,
-                    assumed_price: price,
-                });
-            }
-        }
+        Ok(ScenarioTrade {
+            id: self.id, label, symbol: sym,
+            direction: self.direction.get(), contracts: qty, price, option_spec,
+            closes_position_id, closes_cost_basis, closes_is_long, closes_opened_at,
+        })
+    }
+}
 
-        saving.set(true);
-        let token = auth.token.get().unwrap_or_default();
-        let user_id = auth.user_id.get().unwrap_or_default();
-        let s = scenario.clone();
-        let cb = Rc::clone(&on_created);
-        spawn_local(async move {
-            match supabase::upsert_scenario(&token, &user_id, &s).await {
-                Ok(_) => cb(s),
-                Err(e) => { err.set(Some(e)); saving.set(false); }
+#[derive(Clone)]
+struct MarketEntry {
+    symbol: RwSignal<String>,
+    price: RwSignal<String>,
+    vol: RwSignal<String>,
+    rate: RwSignal<String>,
+}
+
+impl MarketEntry {
+    fn new() -> Self {
+        Self {
+            symbol: RwSignal::new(String::new()),
+            price: RwSignal::new(String::new()),
+            vol: RwSignal::new("25".to_string()),
+            rate: RwSignal::new("5".to_string()),
+        }
+    }
+
+    fn from_input(mi: &ScenarioMarketInput) -> Self {
+        Self {
+            symbol: RwSignal::new(mi.symbol.clone()),
+            price: RwSignal::new(format!("{:.2}", mi.price)),
+            vol: RwSignal::new(format!("{:.2}", mi.vol * 100.0)),
+            rate: RwSignal::new(format!("{:.2}", mi.rate * 100.0)),
+        }
+    }
+
+    fn to_input(&self) -> Result<ScenarioMarketInput, String> {
+        let sym = self.symbol.get().trim().to_uppercase();
+        if sym.is_empty() { return Err("Symbol required".into()); }
+        let price: f64 = self.price.get().trim().parse().map_err(|_| "Invalid price")?;
+        let vol: f64 = self.vol.get().trim().parse::<f64>().map_err(|_| "Invalid vol")? / 100.0;
+        let rate: f64 = self.rate.get().trim().parse::<f64>().map_err(|_| "Invalid rate")? / 100.0;
+        Ok(ScenarioMarketInput { symbol: sym, price, vol, rate })
+    }
+
+    fn as_mi(&self) -> Option<ScenarioMarketInput> { self.to_input().ok() }
+}
+
+#[component]
+fn ScenarioForm(
+    auth: AuthState,
+    positions: Vec<Position>,
+    existing: Option<Scenario>,
+    on_saved: impl Fn(Scenario) + 'static,
+    on_cancel: impl Fn() + 'static,
+) -> impl IntoView {
+    let on_saved  = Rc::new(on_saved);
+    let on_cancel = Rc::new(on_cancel);
+
+    let is_edit = existing.is_some();
+
+    let name = RwSignal::new(existing.as_ref().map(|s| s.name.clone()).unwrap_or_default());
+    let eval_date = RwSignal::new(existing.as_ref()
+        .map(|s| s.evaluation_date.format("%Y-%m-%d").to_string())
+        .unwrap_or_default());
+    let market_entries = RwSignal::new(match &existing {
+        Some(s) if !s.market_inputs.is_empty() => s.market_inputs.iter().map(MarketEntry::from_input).collect(),
+        _ => vec![MarketEntry::new()],
+    });
+    let trade_entries = RwSignal::new(match &existing {
+        Some(s) if !s.trades.is_empty() => s.trades.iter().map(TradeEntry::from_trade).collect(),
+        _ => vec![TradeEntry::new()],
+    });
+    let err    = RwSignal::new(Option::<String>::None);
+    let saving = RwSignal::new(false);
+
+    let positions = Arc::new(positions);
+
+    let existing_for_submit = existing.clone();
+
+    let add_market = move |_: web_sys::MouseEvent| market_entries.update(|v| v.push(MarketEntry::new()));
+    let add_trade  = move |_: web_sys::MouseEvent| trade_entries.update(|v| v.push(TradeEntry::new()));
+
+    let on_submit = {
+        let positions  = Arc::clone(&positions);
+        let on_cancel2 = Rc::clone(&on_cancel);
+        move |ev: web_sys::SubmitEvent| {
+            ev.prevent_default();
+            let n = name.get().trim().to_string();
+            if n.is_empty() { err.set(Some("Name required.".into())); return; }
+            let ed = match NaiveDate::parse_from_str(eval_date.get().trim(), "%Y-%m-%d") {
+                Ok(d) => d,
+                Err(_) => { err.set(Some("Evaluation date must be YYYY-MM-DD.".into())); return; }
+            };
+
+            // Preserve id / created_at / archived when editing
+            let mut scenario = match &existing_for_submit {
+                Some(ex) => Scenario { name: n, evaluation_date: ed, market_inputs: vec![], trades: vec![], ..ex.clone() },
+                None => Scenario::new(&n, ed),
+            };
+
+            for me in market_entries.get() {
+                match me.to_input() {
+                    Ok(mi) => scenario.market_inputs.push(mi),
+                    Err(e) => { err.set(Some(format!("Market input: {}", e))); return; }
+                }
             }
-        });
+            for te in trade_entries.get() {
+                match te.to_trade(&positions) {
+                    Ok(t) => scenario.trades.push(t),
+                    Err(e) => { err.set(Some(format!("Trade: {}", e))); return; }
+                }
+            }
+
+            saving.set(true);
+            let token   = auth.token.get().unwrap_or_default();
+            let user_id = auth.user_id.get().unwrap_or_default();
+            let s    = scenario.clone();
+            let cb   = Rc::clone(&on_saved);
+            let cancel = Rc::clone(&on_cancel2);
+            spawn_local(async move {
+                match supabase::upsert_scenario(&token, &user_id, &s).await {
+                    Ok(_)  => cb(s),
+                    Err(e) => { err.set(Some(e)); saving.set(false); let _ = cancel; }
+                }
+            });
+        }
     };
 
     view! {
-        <form on:submit=on_submit class="bg-panel border border-border rounded-xl p-6 space-y-4">
-            <h2 class="text-sm font-medium text-gray-300">"New scenario"</h2>
+        <form on:submit=on_submit class="bg-panel border border-border rounded-xl p-6 space-y-6">
+            <div class="flex items-center justify-between">
+                <h2 class="text-sm font-medium text-gray-300">
+                    {if is_edit { "Edit scenario" } else { "New scenario" }}
+                </h2>
+                <button type="button" class="text-xs text-gray-500 hover:text-gray-300"
+                    on:click=move |_| on_cancel()>
+                    "Cancel"
+                </button>
+            </div>
 
             <div class="grid grid-cols-2 gap-3">
-                <div>
-                    <label class="block text-xs text-gray-400 mb-1">"Name"</label>
-                    <input
-                        class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
-                        prop:value=move || name.get()
-                        on:input=move |ev| name.set(event_target_value(&ev))
-                        placeholder="e.g. Bull case Q4"
-                    />
-                </div>
-                <div>
-                    <label class="block text-xs text-gray-400 mb-1">"Evaluation date (YYYY-MM-DD)"</label>
-                    <input
-                        class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
-                        prop:value=move || eval_date.get()
-                        on:input=move |ev| eval_date.set(event_target_value(&ev))
-                        placeholder="2025-06-30"
-                    />
-                </div>
+                <FormInput label="Name" signal=name ph="e.g. Roll AAPL puts to June" />
+                <FormInput label="Evaluation date (YYYY-MM-DD)" signal=eval_date ph="2025-06-20" />
             </div>
 
             <div class="space-y-2">
-                <p class="text-xs text-gray-400">"Price assumptions"</p>
-                {move || assumptions.get().into_iter().map(|(sym, price)| view! {
-                    <div class="flex gap-2">
-                        <input
-                            class="flex-1 bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
-                            prop:value=move || sym.get()
-                            on:input=move |ev| sym.set(event_target_value(&ev))
-                            placeholder="AAPL"
-                        />
-                        <input
-                            class="flex-1 bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
-                            prop:value=move || price.get()
-                            on:input=move |ev| price.set(event_target_value(&ev))
-                            placeholder="200.00"
-                        />
-                    </div>
+                <p class="text-xs font-medium text-gray-400 uppercase tracking-wider">"Market inputs"</p>
+                <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center text-xs text-gray-500">
+                    <span>"Symbol"</span><span>"Price"</span><span>"IV %"</span><span>"Rate %"</span><span/>
+                </div>
+                {move || market_entries.get().into_iter().enumerate().map(|(i, me)| {
+                    view! {
+                        <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center">
+                            <MicroInput signal=me.symbol ph="AAPL" />
+                            <MicroInput signal=me.price ph="155.00" />
+                            <MicroInput signal=me.vol ph="25" />
+                            <MicroInput signal=me.rate ph="5" />
+                            <button type="button" class="text-gray-600 hover:text-red-400 text-xs"
+                                on:click=move |_| market_entries.update(|v| { if v.len() > 1 { v.remove(i); } })>
+                                "✕"
+                            </button>
+                        </div>
+                    }
                 }).collect_view()}
-                <button
-                    type="button"
-                    class="text-xs text-blue-400 hover:text-blue-300"
-                    on:click=add_assumption
-                >
+                <button type="button" class="text-xs text-blue-400 hover:text-blue-300" on:click=add_market>
                     "+ add symbol"
+                </button>
+            </div>
+
+            <div class="space-y-3">
+                <p class="text-xs font-medium text-gray-400 uppercase tracking-wider">"Trades"</p>
+                {move || trade_entries.get().into_iter().enumerate().map(|(i, te)| {
+                    let positions_for_row = Arc::clone(&positions);
+                    let market_for_row = market_entries;
+                    view! {
+                        <TradeEntryRow
+                            entry=te
+                            positions=(*positions_for_row).clone()
+                            market_entries=market_for_row
+                            eval_date=eval_date
+                            on_remove=move || trade_entries.update(|v| { if v.len() > 1 { v.remove(i); } })
+                        />
+                    }
+                }).collect_view()}
+                <button type="button" class="text-xs text-blue-400 hover:text-blue-300" on:click=add_trade>
+                    "+ add leg"
                 </button>
             </div>
 
             {move || err.get().map(|e| view! { <p class="text-red-400 text-xs">{e}</p> })}
 
-            <button
-                type="submit"
-                class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm font-medium transition-colors"
+            <button type="submit"
+                class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm font-medium"
                 prop:disabled=move || saving.get()
             >
-                {move || if saving.get() { "Saving…" } else { "Create" }}
+                {move || if saving.get() { "Saving…" } else if is_edit { "Save changes" } else { "Create & evaluate" }}
             </button>
         </form>
     }
 }
 
-// ── Scenario result card ──────────────────────────────────────────────────────
-
 #[component]
-fn ScenarioCard(scenario: Scenario, result: ScenarioResult) -> impl IntoView {
-    let st_rate = 0.37_f64;
-    let lt_rate = 0.20_f64;
-    let tax = result.total_tax_estimate(st_rate, lt_rate);
-    let after_tax = result.total_pnl - tax;
+fn TradeEntryRow(
+    entry: TradeEntry,
+    positions: Vec<Position>,
+    market_entries: RwSignal<Vec<MarketEntry>>,
+    eval_date: RwSignal<String>,
+    on_remove: impl Fn() + 'static,
+) -> impl IntoView {
+    let positions = Rc::new(positions);
+    let pos_for_select = Rc::clone(&positions);
 
-    let pnl_class = if result.total_pnl >= 0.0 { "text-green-400" } else { "text-red-400" };
-    let at_class = if after_tax >= 0.0 { "text-green-300" } else { "text-red-300" };
+    let on_closes_change = {
+        let positions = Rc::clone(&positions);
+        let entry = entry.clone();
+        move |ev: web_sys::Event| {
+            let val = event_target_value(&ev);
+            if val.is_empty() { entry.closes_id.set(None); return; }
+            let pid: Uuid = match val.parse() { Ok(v) => v, Err(_) => return };
+            entry.closes_id.set(Some(pid));
+            if let Some(p) = positions.iter().find(|p| p.id == pid) {
+                entry.symbol.set(p.symbol.clone());
+                entry.direction.set(if p.quantity > 0 { TradeDirection::Sell } else { TradeDirection::Buy });
+                entry.contracts.set(p.quantity.unsigned_abs().to_string());
+                if let Some(spec) = &p.option_spec {
+                    entry.is_option.set(true);
+                    entry.opt_type.set(spec.option_type);
+                    entry.strike.set(format!("{}", spec.strike));
+                    entry.expiry.set(spec.expiry.format("%Y-%m-%d").to_string());
+                } else {
+                    entry.is_option.set(false);
+                }
+            }
+        }
+    };
+
+    let entry_for_compute = entry.clone();
+    let compute_price = move |_: web_sys::MouseEvent| {
+        let sym = entry_for_compute.symbol.get().trim().to_uppercase();
+        let mi = market_entries.get().into_iter()
+            .find(|m| m.symbol.get().trim().to_uppercase() == sym)
+            .and_then(|m| m.as_mi());
+        let ed = NaiveDate::parse_from_str(eval_date.get().trim(), "%Y-%m-%d").ok();
+        if let (Some(mi), Some(ed), true) = (mi, ed, entry_for_compute.is_option.get()) {
+            let s: f64 = entry_for_compute.strike.get().trim().parse().unwrap_or(0.0);
+            if let Some(exp) = NaiveDate::parse_from_str(entry_for_compute.expiry.get().trim(), "%Y-%m-%d").ok() {
+                let spec = OptionSpec { symbol: sym, option_type: entry_for_compute.opt_type.get(), strike: s, expiry: exp };
+                if let Some(p) = bs_price(&spec, &mi, ed) {
+                    entry_for_compute.price.set(format!("{:.4}", p));
+                }
+            }
+        }
+    };
 
     view! {
-        <div class="bg-panel border border-border rounded-xl p-6 space-y-4">
-            <div class="flex items-start justify-between">
-                <div>
-                    <h2 class="font-medium">{scenario.name.clone()}</h2>
-                    <p class="text-xs text-gray-500 mt-0.5">
-                        "Eval date: " {scenario.evaluation_date.format("%d %b %Y").to_string()}
-                    </p>
-                </div>
-                <div class="text-right">
-                    <p class=format!("text-lg font-semibold {}", pnl_class)>
-                        {format!("{}{:.2}", if result.total_pnl >= 0.0 { "+" } else { "" }, result.total_pnl)}
-                    </p>
-                    <p class="text-xs text-gray-500">"total P&L"</p>
-                </div>
+        <div class="bg-surface border border-border rounded-lg p-3 space-y-2">
+            <div class="flex flex-wrap gap-2 items-center">
+                <input class=MICRO_CLS prop:value=move || entry.label.get()
+                    on:input=move |ev| entry.label.set(event_target_value(&ev))
+                    placeholder="Label (optional)" style="width:12rem" />
+
+                {[TradeDirection::Buy, TradeDirection::Sell].map(|d| view! {
+                    <button type="button"
+                        class=move || format!("px-3 py-1 rounded text-xs border transition-colors {}",
+                            if entry.direction.get() == d { "bg-blue-600 border-blue-600 text-white" }
+                            else { "bg-panel border-border text-gray-400" })
+                        on:click=move |_| entry.direction.set(d)
+                    >{d.label()}</button>
+                })}
+
+                <input class=MICRO_CLS prop:value=move || entry.symbol.get()
+                    on:input=move |ev| entry.symbol.set(event_target_value(&ev))
+                    placeholder="Symbol" style="width:5rem" />
+                <input class=MICRO_CLS prop:value=move || entry.contracts.get()
+                    on:input=move |ev| entry.contracts.set(event_target_value(&ev))
+                    placeholder="Qty" style="width:4rem" />
+                <input class=MICRO_CLS prop:value=move || entry.price.get()
+                    on:input=move |ev| entry.price.set(event_target_value(&ev))
+                    placeholder="Price" style="width:6rem" />
+
+                <button type="button"
+                    class=move || format!("px-2 py-1 rounded text-xs border transition-colors {}",
+                        if entry.is_option.get() { "bg-indigo-700 border-indigo-600 text-white" }
+                        else { "bg-panel border-border text-gray-400" })
+                    on:click=move |_| entry.is_option.update(|v| *v = !*v)
+                >
+                    {move || if entry.is_option.get() { "Option" } else { "Stock" }}
+                </button>
+
+                <button type="button"
+                    class="text-xs text-gray-500 hover:text-blue-300 border border-border rounded px-2 py-1"
+                    on:click=compute_price title="Compute B-S price from market inputs"
+                >"B-S ▶"</button>
+
+                <button type="button" class="text-gray-600 hover:text-red-400 text-xs ml-auto"
+                    on:click=move |_| on_remove()>"✕"</button>
             </div>
 
-            <div class="space-y-1">
-                {result.legs.iter().map(|leg| {
-                    let lc = if leg.pnl >= 0.0 { "text-green-400" } else { "text-red-400" };
-                    view! {
-                        <div class="flex justify-between text-xs">
-                            <span class="text-gray-400">{leg.description.clone()}</span>
-                            <span class=lc>
-                                {format!("{}{:.2}", if leg.pnl >= 0.0 { "+" } else { "" }, leg.pnl)}
-                            </span>
-                        </div>
-                    }
-                }).collect_view()}
-            </div>
+            {move || entry.is_option.get().then(|| view! {
+                <div class="flex flex-wrap gap-2 items-center pl-2">
+                    {[OptionType::Call, OptionType::Put].map(|t| view! {
+                        <button type="button"
+                            class=move || format!("px-2 py-0.5 rounded text-xs border {}",
+                                if entry.opt_type.get() == t { "bg-blue-600 border-blue-600 text-white" }
+                                else { "bg-panel border-border text-gray-400" })
+                            on:click=move |_| entry.opt_type.set(t)
+                        >{t.label()}</button>
+                    })}
+                    <input class=MICRO_CLS prop:value=move || entry.strike.get()
+                        on:input=move |ev| entry.strike.set(event_target_value(&ev))
+                        placeholder="Strike" style="width:5rem" />
+                    <input class=MICRO_CLS prop:value=move || entry.expiry.get()
+                        on:input=move |ev| entry.expiry.set(event_target_value(&ev))
+                        placeholder="Expiry YYYY-MM-DD" style="width:9rem" />
+                </div>
+            })}
 
-            <div class="border-t border-border pt-3 grid grid-cols-3 gap-2 text-xs">
-                <div>
-                    <p class="text-gray-500">"ST gain (37%)"</p>
-                    <p class="text-yellow-300">{format!("${:.2}", result.total_short_term)}</p>
-                </div>
-                <div>
-                    <p class="text-gray-500">"LT gain (20%)"</p>
-                    <p class="text-blue-300">{format!("${:.2}", result.total_long_term)}</p>
-                </div>
-                <div>
-                    <p class="text-gray-500">"Est. tax"</p>
-                    <p class="text-orange-300">{format!("${:.2}", tax)}</p>
-                </div>
-            </div>
-            <div class="flex justify-between items-center text-sm">
-                <span class="text-gray-400">"After-tax P&L"</span>
-                <span class=format!("font-semibold {}", at_class)>
-                    {format!("{}{:.2}", if after_tax >= 0.0 { "+" } else { "" }, after_tax)}
-                </span>
+            <div class="flex items-center gap-2 pl-2">
+                <span class="text-xs text-gray-500">"Closes:"</span>
+                <select
+                    class="bg-surface border border-border rounded px-2 py-1 text-xs text-gray-300 focus:outline-none focus:border-blue-500"
+                    on:change=on_closes_change
+                >
+                    <option value="">"— none —"</option>
+                    {pos_for_select.iter().map(|p| {
+                        let id = p.id.to_string();
+                        let label = match &p.option_spec {
+                            Some(spec) => format!("{} {} ${:.0} {} ×{:+}",
+                                p.symbol, spec.option_type.label(), spec.strike,
+                                spec.expiry.format("%d-%b-%y"), p.quantity),
+                            None => format!("{} stock ×{:+}", p.symbol, p.quantity),
+                        };
+                        view! { <option value=id.clone()>{label}</option> }
+                    }).collect_view()}
+                </select>
+                {move || entry.closes_id.get().map(|_| view! {
+                    <span class="text-xs text-yellow-400">"⚡ P&L will be computed"</span>
+                })}
             </div>
         </div>
+    }
+}
+
+const MICRO_CLS: &str =
+    "bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500";
+
+// ── Scenario card ─────────────────────────────────────────────────────────────
+
+#[component]
+fn ScenarioCard(
+    scenario: Scenario,
+    result: ScenarioResult,
+    auth: AuthState,
+    all_scenarios: RwSignal<Vec<Scenario>>,
+    on_edit: impl Fn() + 'static,
+) -> impl IntoView {
+    let expanded = RwSignal::new(false);
+
+    let st_rate = 0.37_f64;
+    let lt_rate = 0.20_f64;
+    let tax = result.tax_estimate(st_rate, lt_rate);
+    let after_tax_cash = result.net_cash - tax;
+
+    let cash_class = if result.net_cash >= 0.0 { "text-green-400" } else { "text-red-400" };
+    let at_class   = if after_tax_cash >= 0.0  { "text-green-300" } else { "text-red-300" };
+
+    let id            = scenario.id;
+    let is_archived   = scenario.archived;
+    let name          = scenario.name.clone();
+    let eval_date_str = scenario.evaluation_date.format("%d %b %Y").to_string();
+    let market_inputs = scenario.market_inputs.clone();
+    let trade_results = result.trade_results.clone();
+    let assignments   = result.assignments.clone();
+    let greeks        = result.greeks;
+    let net_cash      = result.net_cash;
+    let total_st      = result.total_st_gain;
+    let total_lt      = result.total_lt_gain;
+    let has_market    = !market_inputs.is_empty();
+
+    let toggle_archive = move |ev: web_sys::MouseEvent| {
+        ev.stop_propagation();
+        let tok = auth.token.get().unwrap_or_default();
+        let uid = auth.user_id.get().unwrap_or_default();
+        all_scenarios.update(|ss| {
+            if let Some(s) = ss.iter_mut().find(|s| s.id == id) { s.archived = !s.archived; }
+        });
+        if let Some(s) = all_scenarios.get().into_iter().find(|s| s.id == id) {
+            spawn_local(async move { let _ = supabase::upsert_scenario(&tok, &uid, &s).await; });
+        }
+    };
+
+    view! {
+        <div class="bg-panel border border-border rounded-xl overflow-hidden">
+
+            // ── Header ────────────────────────────────────────────────────
+            <div
+                class="flex items-center justify-between px-6 py-4 cursor-pointer hover:bg-white/5 transition-colors select-none"
+                on:click=move |_| expanded.update(|v| *v = !*v)
+            >
+                <div class="flex items-center gap-3 min-w-0">
+                    <span class="text-gray-500 text-xs w-3 shrink-0">
+                        {move || if expanded.get() { "▾" } else { "▸" }}
+                    </span>
+                    <div>
+                        <p class="font-medium">{name}</p>
+                        <p class="text-xs text-gray-500">{eval_date_str}</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                    <div class="text-right mr-2">
+                        <p class="text-xs text-gray-500">"Net cash"</p>
+                        <p class=format!("text-lg font-semibold {}", cash_class)>{fmt_cash(net_cash)}</p>
+                    </div>
+                    <button
+                        class="text-xs text-gray-500 hover:text-blue-400 border border-border rounded px-2 py-1 transition-colors"
+                        on:click=move |ev: web_sys::MouseEvent| { ev.stop_propagation(); on_edit(); }
+                    >"Edit"</button>
+                    <button
+                        class="text-xs text-gray-500 hover:text-yellow-400 border border-border rounded px-2 py-1 transition-colors"
+                        on:click=toggle_archive
+                    >{if is_archived { "Unarchive" } else { "Archive" }}</button>
+                </div>
+            </div>
+
+            // ── Expanded body ─────────────────────────────────────────────
+            {move || expanded.get().then(|| view! {
+                <div class="px-6 pb-6 pt-4 border-t border-border space-y-4">
+
+                    {(!market_inputs.is_empty()).then(|| view! {
+                        <div class="flex flex-wrap gap-3 text-xs text-gray-500">
+                            {market_inputs.iter().map(|mi| view! {
+                                <span>
+                                    <span class="font-semibold text-gray-300">{mi.symbol.clone()}</span>
+                                    " $" {format!("{:.2}", mi.price)}
+                                    " IV " {format!("{:.0}%", mi.vol * 100.0)}
+                                </span>
+                            }).collect_view()}
+                        </div>
+                    })}
+
+                    {(!trade_results.is_empty()).then(|| view! {
+                        <div class="space-y-1">
+                            <p class="text-xs text-gray-500 uppercase tracking-wider">"Trades"</p>
+                            {trade_results.iter().map(|tr| view! {
+                                <div class="flex justify-between items-start text-xs">
+                                    <span class="text-gray-400">{tr.label.clone()}</span>
+                                    <div class="text-right space-y-0.5">
+                                        <p class={if tr.cash_flow >= 0.0 { "text-green-400" } else { "text-red-400" }}>
+                                            {fmt_cash(tr.cash_flow)} " cash"
+                                        </p>
+                                        {tr.realized_gain.map(|g| view! {
+                                            <p class={if g >= 0.0 { "text-green-300" } else { "text-red-300" }}>
+                                                {fmt_cash(g)} " gain (" {if tr.is_long_term { "LT" } else { "ST" }} ")"
+                                            </p>
+                                        })}
+                                    </div>
+                                </div>
+                            }).collect_view()}
+                        </div>
+                    })}
+
+                    {(!assignments.is_empty()).then(|| view! {
+                        <div class="space-y-1">
+                            <p class="text-xs text-yellow-500 uppercase tracking-wider">"⚡ Auto-detected assignments"</p>
+                            {assignments.iter().map(|a| view! {
+                                <div class="flex justify-between items-start text-xs">
+                                    <div>
+                                        <p class="text-yellow-300">{a.description.clone()}</p>
+                                        <p class="text-gray-500">
+                                            {match a.option_type {
+                                                OptionType::Call => format!("Shares called away at ${:.2}", a.strike),
+                                                OptionType::Put  => format!("Shares put at ${:.2}", a.strike),
+                                            }}
+                                        </p>
+                                    </div>
+                                    <div class="text-right space-y-0.5">
+                                        <p class={if a.stock_cash_flow >= 0.0 { "text-green-400" } else { "text-red-400" }}>
+                                            {fmt_cash(a.stock_cash_flow)} " stock cash"
+                                        </p>
+                                        <p class={if a.option_pnl >= 0.0 { "text-green-300" } else { "text-red-300" }}>
+                                            {fmt_cash(a.option_pnl)} " option P&L (" {if a.is_long_term { "LT" } else { "ST" }} ")"
+                                        </p>
+                                    </div>
+                                </div>
+                            }).collect_view()}
+                        </div>
+                    })}
+
+                    <div class="border-t border-border pt-3 grid grid-cols-2 gap-4 text-xs">
+                        <div>
+                            <p class="text-gray-500 mb-1">"Realized gains"</p>
+                            <p class="text-yellow-300">"ST: " {fmt_cash(total_st)}</p>
+                            <p class="text-blue-300">"LT: " {fmt_cash(total_lt)}</p>
+                            <p class="text-orange-300 mt-1">"Est. tax (37% / 20%): " {fmt_cash(-tax)}</p>
+                        </div>
+                        <div class="text-right">
+                            <p class="text-gray-500 mb-1">"After-tax net cash"</p>
+                            <p class=format!("text-xl font-semibold {}", at_class)>{fmt_cash(after_tax_cash)}</p>
+                        </div>
+                    </div>
+
+                    {has_market.then(|| view! {
+                        <div class="border-t border-border pt-3">
+                            <p class="text-xs text-gray-500 mb-2">"Portfolio Greeks (scenario conditions)"</p>
+                            <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs font-mono">
+                                <span class="text-gray-500">"Δ "<span class="text-gray-200">{format!("{:.2}", greeks.delta)}</span></span>
+                                <span class="text-gray-500">"Γ "<span class="text-gray-200">{format!("{:.4}", greeks.gamma)}</span></span>
+                                <span class="text-gray-500">"ν "<span class="text-gray-200">{format!("{:.2}", greeks.vega)}</span></span>
+                                <span class="text-gray-500">"θ "<span class="text-gray-200">{format!("{:.2}", greeks.theta)}</span></span>
+                                <span class="text-gray-500">"ρ "<span class="text-gray-200">{format!("{:.2}", greeks.rho)}</span></span>
+                            </div>
+                        </div>
+                    })}
+                </div>
+            })}
+        </div>
+    }
+}
+
+fn fmt_cash(v: f64) -> String {
+    format!("{}{:.2}", if v >= 0.0 { "+$" } else { "-$" }, v.abs())
+}
+
+// ── Shared form components ────────────────────────────────────────────────────
+
+#[component]
+fn FormInput(label: &'static str, signal: RwSignal<String>, ph: &'static str) -> impl IntoView {
+    view! {
+        <div>
+            <label class="block text-xs text-gray-400 mb-1">{label}</label>
+            <input
+                class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                prop:value=move || signal.get()
+                on:input=move |ev| signal.set(event_target_value(&ev))
+                placeholder=ph
+            />
+        </div>
+    }
+}
+
+#[component]
+fn MicroInput(signal: RwSignal<String>, ph: &'static str) -> impl IntoView {
+    view! {
+        <input
+            class="w-full bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+            prop:value=move || signal.get()
+            on:input=move |ev| signal.set(event_target_value(&ev))
+            placeholder=ph
+        />
     }
 }

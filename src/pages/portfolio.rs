@@ -3,7 +3,6 @@ use std::rc::Rc;
 
 use chrono::NaiveDate;
 use leptos::prelude::*;
-use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::api::supabase;

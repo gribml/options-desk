@@ -9,6 +9,7 @@ use crate::models::{position::Position, scenario::Scenario};
 #[derive(Debug, Deserialize)]
 pub struct AuthResponse {
     pub access_token: String,
+    pub refresh_token: String,
     pub user: AuthUser,
 }
 
@@ -21,6 +22,31 @@ pub struct AuthUser {
 #[derive(Debug, Deserialize)]
 pub struct SupabaseError {
     pub message: String,
+}
+
+pub async fn refresh_session(refresh_token: &str) -> Result<AuthResponse, String> {
+    let url = format!("{}/auth/v1/token?grant_type=refresh_token", base_url());
+    let body = serde_json::json!({ "refresh_token": refresh_token });
+
+    let resp = Request::post(&url)
+        .header("apikey", SUPABASE_ANON_KEY)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.ok() {
+        resp.json::<AuthResponse>().await.map_err(|e| e.to_string())
+    } else {
+        let err = resp
+            .json::<SupabaseError>()
+            .await
+            .map(|e| e.message)
+            .unwrap_or_else(|_| "Token refresh failed".to_string());
+        Err(err)
+    }
 }
 
 pub async fn login(email: &str, password: &str) -> Result<AuthResponse, String> {
@@ -73,7 +99,6 @@ fn authed_post(url: &str, token: &str) -> gloo_net::http::RequestBuilder {
         .header("apikey", SUPABASE_ANON_KEY)
         .header("Authorization", &format!("Bearer {}", token))
         .header("Content-Type", "application/json")
-        .header("Prefer", "return=representation")
 }
 
 fn authed_delete(url: &str, token: &str) -> gloo_net::http::RequestBuilder {
@@ -138,7 +163,9 @@ pub async fn upsert_position(
     if resp.ok() {
         Ok(())
     } else {
-        Err(format!("Upsert position failed: {}", resp.status()))
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("Upsert position failed: {} — {}", status, body))
     }
 }
 
@@ -174,12 +201,9 @@ pub async fn fetch_scenarios(token: &str, user_id: &str) -> Result<Vec<Scenario>
     }
 
     let rows: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
-    rows.into_iter()
-        .map(|r| {
-            serde_json::from_value::<Scenario>(r["payload"].clone())
-                .map_err(|e| e.to_string())
-        })
-        .collect()
+    Ok(rows.into_iter()
+        .filter_map(|r| serde_json::from_value::<Scenario>(r["payload"].clone()).ok())
+        .collect())
 }
 
 pub async fn upsert_scenario(
@@ -205,7 +229,9 @@ pub async fn upsert_scenario(
     if resp.ok() {
         Ok(())
     } else {
-        Err(format!("Upsert scenario failed: {}", resp.status()))
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("Upsert scenario failed: {} — {}", status, body))
     }
 }
 
