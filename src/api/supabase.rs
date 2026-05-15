@@ -24,7 +24,7 @@ pub struct SupabaseError {
 }
 
 pub async fn login(email: &str, password: &str) -> Result<AuthResponse, String> {
-    let url = format!("{}/auth/v1/token?grant_type=password", SUPABASE_URL);
+    let url = format!("{}/auth/v1/token?grant_type=password", base_url());
     let body = serde_json::json!({ "email": email, "password": password });
 
     let resp = Request::post(&url)
@@ -50,8 +50,15 @@ pub async fn login(email: &str, password: &str) -> Result<AuthResponse, String> 
 
 // ── Generic REST helpers ──────────────────────────────────────────────────────
 
+fn base_url() -> &'static str {
+    SUPABASE_URL
+        .trim_end_matches('/')
+        .trim_end_matches("/rest/v1")
+        .trim_end_matches('/')
+}
+
 fn rest_url(table: &str) -> String {
-    format!("{}/rest/v1/{}", SUPABASE_URL, table)
+    format!("{}/rest/v1/{}", base_url(), table)
 }
 
 fn authed_get(url: &str, token: &str) -> gloo_net::http::RequestBuilder {
