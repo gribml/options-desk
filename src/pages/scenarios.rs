@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::api::supabase;
+use crate::api::{market, supabase};
 use crate::app::AuthState;
 use crate::models::{
     option::{OptionSpec, OptionType},
@@ -117,6 +117,7 @@ pub fn ScenariosPage() -> impl IntoView {
     let show_new   = RwSignal::new(false);
     let show_archived = RwSignal::new(false);
     let editing_id = RwSignal::new(Option::<Uuid>::None);
+    let sync_loading = RwSignal::new(false);
 
     Effect::new(move |_| {
         let token = auth.token.get();
@@ -134,19 +135,46 @@ pub fn ScenariosPage() -> impl IntoView {
         } else { loading.set(false); }
     });
 
+    let sync_history = move || {
+        let token = auth.token.get_untracked().unwrap_or_default();
+        let syms: Vec<String> = scenarios.get_untracked()
+            .into_iter()
+            .filter(|s| !s.archived)
+            .flat_map(|s| s.market_inputs.into_iter().map(|mi| mi.symbol))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        if syms.is_empty() { return; }
+        sync_loading.set(true);
+        spawn_local(async move {
+            let _ = market::trigger_history_sync(&token, &syms).await;
+            sync_loading.set(false);
+        });
+    };
+
     view! {
         <div class="space-y-6">
             <div class="flex items-center justify-between">
                 <h1 class="text-xl font-semibold">"Scenarios"</h1>
-                <button
-                    class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
-                    on:click=move |_| {
-                        editing_id.set(None);
-                        show_new.update(|v| *v = !*v);
-                    }
-                >
-                    {move || if show_new.get() || editing_id.get().is_some() { "Cancel" } else { "+ New scenario" }}
-                </button>
+                <div class="flex items-center gap-3">
+                    <button
+                        class="text-xs text-gray-500 hover:text-purple-300 disabled:opacity-40 transition-colors"
+                        prop:disabled=move || sync_loading.get()
+                        on:click=move |_| sync_history()
+                        title="Fetch 2-year daily history for all scenario symbols"
+                    >
+                        {move || if sync_loading.get() { "Syncing…" } else { "⟳ Sync history" }}
+                    </button>
+                    <button
+                        class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
+                        on:click=move |_| {
+                            editing_id.set(None);
+                            show_new.update(|v| *v = !*v);
+                        }
+                    >
+                        {move || if show_new.get() || editing_id.get().is_some() { "Cancel" } else { "+ New scenario" }}
+                    </button>
+                </div>
             </div>
 
             // New scenario form
@@ -485,16 +513,40 @@ fn ScenarioForm(
 
             <div class="space-y-2">
                 <p class="text-xs font-medium text-gray-400 uppercase tracking-wider">"Market inputs"</p>
-                <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center text-xs text-gray-500">
-                    <span>"Symbol"</span><span>"Price"</span><span>"IV %"</span><span>"Rate %"</span><span/>
+                <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto_auto] gap-2 items-center text-xs text-gray-500">
+                    <span>"Symbol"</span><span>"Price"</span><span>"IV %"</span><span>"Rate %"</span><span/><span/>
                 </div>
                 {move || market_entries.get().into_iter().enumerate().map(|(i, me)| {
+                    let me_fill = me.clone();
+                    let fill = move |_: web_sys::MouseEvent| {
+                        let sym = me_fill.symbol.get().trim().to_uppercase();
+                        if sym.is_empty() { return; }
+                        let token = auth.token.get().unwrap_or_default();
+                        let me2 = me_fill.clone();
+                        spawn_local(async move {
+                            // Live price
+                            if let Ok(q) = market::fetch_quote(&token, &sym).await {
+                                me2.price.set(format!("{:.2}", q.price));
+                            }
+                            // 30-day realized vol from stored history
+                            if let Ok(closes) = market::fetch_close_prices(&token, &sym, 31).await {
+                                if let Some(vol) = market::realized_vol(&closes, 30) {
+                                    me2.vol.set(format!("{:.1}", vol * 100.0));
+                                }
+                            }
+                        });
+                    };
                     view! {
-                        <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center">
+                        <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto_auto] gap-2 items-center">
                             <MicroInput signal=me.symbol ph="AAPL" />
                             <MicroInput signal=me.price ph="155.00" />
                             <MicroInput signal=me.vol ph="25" />
                             <MicroInput signal=me.rate ph="5" />
+                            <button type="button"
+                                class="text-gray-500 hover:text-blue-300 text-xs border border-border rounded px-1.5 py-1 transition-colors"
+                                on:click=fill
+                                title="Fill price from live quote; fill IV from 30-day realised vol (requires history sync)"
+                            >"↗"</button>
                             <button type="button" class="text-gray-600 hover:text-red-400 text-xs"
                                 on:click=move |_| market_entries.update(|v| { if v.len() > 1 { v.remove(i); } })>
                                 "✕"
@@ -518,6 +570,7 @@ fn ScenarioForm(
                             positions=(*positions_for_row).clone()
                             market_entries=market_for_row
                             eval_date=eval_date
+                            auth=auth
                             on_remove=move || trade_entries.update(|v| { if v.len() > 1 { v.remove(i); } })
                         />
                     }
@@ -545,6 +598,7 @@ fn TradeEntryRow(
     positions: Vec<Position>,
     market_entries: RwSignal<Vec<MarketEntry>>,
     eval_date: RwSignal<String>,
+    auth: AuthState,
     on_remove: impl Fn() + 'static,
 ) -> impl IntoView {
     let positions = Rc::new(positions);
@@ -576,20 +630,40 @@ fn TradeEntryRow(
 
     let entry_for_compute = entry.clone();
     let compute_price = move |_: web_sys::MouseEvent| {
+        if !entry_for_compute.is_option.get() { return; }
         let sym = entry_for_compute.symbol.get().trim().to_uppercase();
-        let mi = market_entries.get().into_iter()
-            .find(|m| m.symbol.get().trim().to_uppercase() == sym)
-            .and_then(|m| m.as_mi());
-        let ed = NaiveDate::parse_from_str(eval_date.get().trim(), "%Y-%m-%d").ok();
-        if let (Some(mi), Some(ed), true) = (mi, ed, entry_for_compute.is_option.get()) {
-            let s: f64 = entry_for_compute.strike.get().trim().parse().unwrap_or(0.0);
-            if let Some(exp) = NaiveDate::parse_from_str(entry_for_compute.expiry.get().trim(), "%Y-%m-%d").ok() {
-                let spec = OptionSpec { symbol: sym, option_type: entry_for_compute.opt_type.get(), strike: s, expiry: exp };
-                if let Some(p) = bs_price(&spec, &mi, ed) {
-                    entry_for_compute.price.set(format!("{:.4}", p));
+        if sym.is_empty() { return; }
+        let strike: f64 = match entry_for_compute.strike.get().trim().parse() {
+            Ok(v) => v, Err(_) => return,
+        };
+        let expiry_str = entry_for_compute.expiry.get().trim().to_string();
+        if expiry_str.is_empty() { return; }
+        let opt_type = entry_for_compute.opt_type.get();
+        let entry2 = entry_for_compute.clone();
+        let token = auth.token.get().unwrap_or_default();
+        let market_entries2 = market_entries;
+        let eval_date2 = eval_date;
+
+        spawn_local(async move {
+            let type_str = match opt_type { OptionType::Call => "call", OptionType::Put => "put" };
+            // Try live market price; fall back to B-S if unavailable.
+            if let Ok(oq) = market::fetch_option_quote(&token, &sym, &expiry_str, type_str, strike).await {
+                entry2.price.set(format!("{:.4}", oq.price));
+                return;
+            }
+            let mi = market_entries2.get().into_iter()
+                .find(|m| m.symbol.get().trim().to_uppercase() == sym)
+                .and_then(|m| m.as_mi());
+            let ed = NaiveDate::parse_from_str(eval_date2.get().trim(), "%Y-%m-%d").ok();
+            if let (Some(mi), Some(ed)) = (mi, ed) {
+                if let Ok(exp) = NaiveDate::parse_from_str(&expiry_str, "%Y-%m-%d") {
+                    let spec = OptionSpec { symbol: sym, option_type: opt_type, strike, expiry: exp };
+                    if let Some(p) = bs_price(&spec, &mi, ed) {
+                        entry2.price.set(format!("{:.4}", p));
+                    }
                 }
             }
-        }
+        });
     };
 
     view! {

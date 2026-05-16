@@ -1,0 +1,4 @@
+POLYGON_KEY=your_polygon_api_key
+SUPABASE_URL=https://xxxx.supabase.co
+SUPABASE_SERVICE_KEY=your_service_role_key
+SUPABASE_ANON_KEY=your_anon_key

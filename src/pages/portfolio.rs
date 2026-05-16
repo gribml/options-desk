@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use uuid::Uuid;
+
 use chrono::NaiveDate;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::api::supabase;
+use crate::api::{market, supabase};
 use crate::app::AuthState;
 use crate::models::{
     option::{OptionSpec, OptionType},
@@ -20,11 +22,19 @@ struct MarketData {
     price: String,
     vol: String,
     rate: String,
+    change: Option<f64>,
+    change_pct: Option<f64>,
 }
 
 impl Default for MarketData {
     fn default() -> Self {
-        Self { price: String::new(), vol: "25".to_string(), rate: "5".to_string() }
+        Self {
+            price: String::new(),
+            vol: "25".to_string(),
+            rate: "5".to_string(),
+            change: None,
+            change_pct: None,
+        }
     }
 }
 
@@ -54,7 +64,10 @@ struct PositionMetrics {
     rho: f64,
 }
 
-fn compute_metrics(pos: &Position, md: &MarketData) -> Option<PositionMetrics> {
+/// `option_price` — actual market price fetched from Polygon; when Some,
+/// overrides the B-S theoretical price for the mark. Greeks still use B-S
+/// (with market IV if it was returned alongside the price).
+fn compute_metrics(pos: &Position, md: &MarketData, option_price: Option<f64>) -> Option<PositionMetrics> {
     let price = md.parsed_price()?;
     let qty = pos.quantity as f64;
 
@@ -71,8 +84,6 @@ fn compute_metrics(pos: &Position, md: &MarketData) -> Option<PositionMetrics> {
         }),
         PositionKind::Option => {
             let spec = pos.option_spec.as_ref()?;
-            let vol = md.parsed_vol()?;
-            let rate = md.parsed_rate();
             let t = spec.years_to_expiry();
             let mult = qty * 100.0;
 
@@ -85,16 +96,25 @@ fn compute_metrics(pos: &Position, md: &MarketData) -> Option<PositionMetrics> {
                     mark_price: intrinsic,
                     mark_value: intrinsic * mult,
                     pnl: (intrinsic - pos.cost_basis) * mult,
-                    delta: 0.0, gamma: 0.0, vega: 0.0, theta: 0.0, rho: 0.0,
+                    delta: 0.0,
+                    gamma: 0.0,
+                    vega: 0.0,
+                    theta: 0.0,
+                    rho: 0.0,
                 });
             }
 
+            let vol = md.parsed_vol()?;
+            let rate = md.parsed_rate();
             let g = BsInputs { spot: price, strike: spec.strike, expiry_years: t, vol, rate }
                 .greeks(spec.option_type);
+
+            // Prefer actual market price; fall back to B-S theoretical.
+            let mark_price = option_price.unwrap_or(g.price);
             Some(PositionMetrics {
-                mark_price: g.price,
-                mark_value: g.price * mult,
-                pnl: (g.price - pos.cost_basis) * mult,
+                mark_price,
+                mark_value: mark_price * mult,
+                pnl: (mark_price - pos.cost_basis) * mult,
                 delta: g.delta * mult,
                 gamma: g.gamma * mult,
                 vega: g.vega * mult,
@@ -145,14 +165,81 @@ pub fn PortfolioPage() -> impl IntoView {
     let error = RwSignal::new(Option::<String>::None);
     let show_add = RwSignal::new(false);
     let market_data = RwSignal::new(HashMap::<String, MarketData>::new());
+    let quote_loading = RwSignal::new(false);
+    let sync_loading = RwSignal::new(false);
+    // Actual market prices for option positions, keyed by position ID.
+    let option_prices = RwSignal::new(HashMap::<Uuid, f64>::new());
 
+    // Apply quotes to market_data (shared by both initial load and refresh).
+    let apply_quotes = move |quotes: Vec<crate::models::market::Quote>| {
+        market_data.update(|map| {
+            for q in quotes {
+                let md = map.entry(q.symbol.clone()).or_default();
+                md.price = format!("{:.2}", q.price);
+                md.change = Some(q.change);
+                md.change_pct = Some(q.change_pct);
+            }
+        });
+    };
+
+    // Load positions, then auto-fetch stock quotes + actual option prices.
     Effect::new(move |_| {
         let token = auth.token.get();
         let user_id = auth.user_id.get();
         if let (Some(tok), Some(uid)) = (token, user_id) {
             spawn_local(async move {
                 match supabase::fetch_positions(&tok, &uid).await {
-                    Ok(ps) => positions.set(ps),
+                    Ok(ps) => {
+                        // Collect everything we need before ps is moved into the signal.
+                        let syms: Vec<String> = ps.iter()
+                            .map(|p| p.symbol.clone())
+                            .collect::<HashSet<_>>()
+                            .into_iter()
+                            .collect();
+                        let option_infos: Vec<(Uuid, String, String, &'static str, f64)> = ps.iter()
+                            .filter_map(|p| {
+                                let spec = p.option_spec.as_ref()?;
+                                Some((
+                                    p.id,
+                                    p.symbol.clone(),
+                                    spec.expiry.format("%Y-%m-%d").to_string(),
+                                    match spec.option_type {
+                                        OptionType::Call => "call",
+                                        OptionType::Put  => "put",
+                                    },
+                                    spec.strike,
+                                ))
+                            })
+                            .collect();
+
+                        positions.set(ps);
+
+                        if !syms.is_empty() {
+                            quote_loading.set(true);
+                            let quotes = market::fetch_quotes(&tok, &syms).await;
+                            apply_quotes(quotes);
+                            quote_loading.set(false);
+                        }
+
+                        // Fetch each option contract's live price concurrently.
+                        for (pos_id, sym, expiry, opt_type, strike) in option_infos {
+                            let tok2 = tok.clone();
+                            let sym2 = sym.clone();
+                            spawn_local(async move {
+                                if let Ok(oq) = market::fetch_option_quote(&tok2, &sym2, &expiry, opt_type, strike).await {
+                                    option_prices.update(|map| { map.insert(pos_id, oq.price); });
+                                    // Update IV so B-S Greeks use the market-implied vol.
+                                    if let Some(iv) = oq.implied_vol {
+                                        market_data.update(|map| {
+                                            if let Some(md) = map.get_mut(&sym2) {
+                                                md.vol = format!("{:.1}", iv * 100.0);
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                    }
                     Err(e) => error.set(Some(e)),
                 }
                 loading.set(false);
@@ -162,7 +249,7 @@ pub fn PortfolioPage() -> impl IntoView {
         }
     });
 
-    // Keep market_data keys in sync with position symbols
+    // Keep market_data keys in sync with position symbols.
     Effect::new(move |_| {
         let ps = positions.get();
         market_data.update(|map| {
@@ -175,13 +262,78 @@ pub fn PortfolioPage() -> impl IntoView {
     let metrics = Memo::new(move |_| {
         let ps = positions.get();
         let md = market_data.get();
+        let op = option_prices.get();
         let empty = MarketData::default();
         ps.iter()
-            .map(|p| compute_metrics(p, md.get(&p.symbol).unwrap_or(&empty)))
+            .map(|p| compute_metrics(p, md.get(&p.symbol).unwrap_or(&empty), op.get(&p.id).copied()))
             .collect::<Vec<_>>()
     });
 
     let summary = Memo::new(move |_| summarize(&positions.get(), &metrics.get()));
+
+    // Refresh live quotes + option prices on demand.
+    let refresh_quotes = move || {
+        let token = auth.token.get_untracked().unwrap_or_default();
+        let ps = positions.get_untracked();
+        let syms: Vec<String> = ps.iter()
+            .map(|p| p.symbol.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if syms.is_empty() { return; }
+
+        quote_loading.set(true);
+        let tok1 = token.clone();
+        spawn_local(async move {
+            let quotes = market::fetch_quotes(&tok1, &syms).await;
+            apply_quotes(quotes);
+            quote_loading.set(false);
+        });
+
+        for p in ps {
+            if let Some(spec) = p.option_spec {
+                let tok2 = token.clone();
+                let sym = p.symbol.clone();
+                let expiry = spec.expiry.format("%Y-%m-%d").to_string();
+                let opt_type = match spec.option_type {
+                    OptionType::Call => "call",
+                    OptionType::Put  => "put",
+                };
+                let pos_id = p.id;
+                let strike = spec.strike;
+                spawn_local(async move {
+                    if let Ok(oq) = market::fetch_option_quote(&tok2, &sym, &expiry, opt_type, strike).await {
+                        option_prices.update(|map| { map.insert(pos_id, oq.price); });
+                        if let Some(iv) = oq.implied_vol {
+                            market_data.update(|map| {
+                                if let Some(md) = map.get_mut(&sym) {
+                                    md.vol = format!("{:.1}", iv * 100.0);
+                                }
+                            });
+                        }
+                    }
+                });
+            }
+        }
+    };
+
+    // Trigger the worker to fetch 2yr history for all portfolio symbols.
+    let sync_history = move || {
+        let token = auth.token.get_untracked().unwrap_or_default();
+        let syms: Vec<String> = positions
+            .get_untracked()
+            .iter()
+            .map(|p| p.symbol.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if syms.is_empty() { return; }
+        sync_loading.set(true);
+        spawn_local(async move {
+            let _ = market::trigger_history_sync(&token, &syms).await;
+            sync_loading.set(false);
+        });
+    };
 
     view! {
         <div class="space-y-6">
@@ -215,11 +367,21 @@ pub fn PortfolioPage() -> impl IntoView {
                 let ps = positions.get();
                 if ps.is_empty() { return None; }
                 let mut seen = HashSet::new();
-                let syms: Vec<String> = ps.iter()
+                let syms: Vec<String> = ps
+                    .iter()
                     .filter(|p| seen.insert(p.symbol.clone()))
                     .map(|p| p.symbol.clone())
                     .collect();
-                Some(view! { <MarketInputsPanel symbols=syms market_data=market_data /> })
+                Some(view! {
+                    <MarketInputsPanel
+                        symbols=syms
+                        market_data=market_data
+                        quote_loading=quote_loading
+                        sync_loading=sync_loading
+                        on_refresh_quotes=move || refresh_quotes()
+                        on_sync_history=move || sync_history()
+                    />
+                })
             }}
 
             // ── Portfolio summary ───────────────────────────────────────────
@@ -266,10 +428,35 @@ pub fn PortfolioPage() -> impl IntoView {
 fn MarketInputsPanel(
     symbols: Vec<String>,
     market_data: RwSignal<HashMap<String, MarketData>>,
+    quote_loading: RwSignal<bool>,
+    sync_loading: RwSignal<bool>,
+    on_refresh_quotes: impl Fn() + 'static,
+    on_sync_history: impl Fn() + 'static,
 ) -> impl IntoView {
     view! {
         <div class="bg-panel border border-border rounded-xl p-4 space-y-3">
-            <p class="text-xs font-medium text-gray-400 uppercase tracking-wider">"Market Inputs"</p>
+            <div class="flex items-center justify-between">
+                <p class="text-xs font-medium text-gray-400 uppercase tracking-wider">"Market Inputs"</p>
+                <div class="flex items-center gap-3">
+                    <button
+                        class="text-xs text-gray-500 hover:text-purple-300 disabled:opacity-40 transition-colors"
+                        prop:disabled=move || sync_loading.get()
+                        on:click=move |_| on_sync_history()
+                        title="Fetch 2-year daily history for all symbols via Cloudflare Worker"
+                    >
+                        {move || if sync_loading.get() { "Syncing history…" } else { "⟳ Sync history" }}
+                    </button>
+                    <button
+                        class="text-xs text-gray-500 hover:text-blue-300 disabled:opacity-40 transition-colors"
+                        prop:disabled=move || quote_loading.get()
+                        on:click=move |_| on_refresh_quotes()
+                        title="Refresh live quotes from Polygon.io"
+                    >
+                        {move || if quote_loading.get() { "Refreshing…" } else { "↻ Refresh quotes" }}
+                    </button>
+                </div>
+            </div>
+
             <div class="grid grid-cols-[auto_1fr_1fr_1fr] gap-x-4 gap-y-2 items-center">
                 <span class="text-xs text-gray-500">"Symbol"</span>
                 <span class="text-xs text-gray-500">"Price"</span>
@@ -277,26 +464,50 @@ fn MarketInputsPanel(
                 <span class="text-xs text-gray-500">"Rate %"</span>
 
                 {symbols.into_iter().map(|sym| {
-                    let (sp, sv, sr) = (sym.clone(), sym.clone(), sym.clone());
+                    let (sp, sv, sr, sc) = (sym.clone(), sym.clone(), sym.clone(), sym.clone());
                     let (wp, wv, wr) = (sym.clone(), sym.clone(), sym.clone());
                     view! {
-                        <span class="text-sm font-semibold">{sym.clone()}</span>
+                        // Symbol + live change badge
+                        <span class="text-sm font-semibold flex items-center gap-1.5">
+                            {sym.clone()}
+                            {move || {
+                                market_data.get().get(&sc).and_then(|md| {
+                                    let pct = md.change_pct?;
+                                    let cls = if pct >= 0.0 { "text-green-400" } else { "text-red-400" };
+                                    let arrow = if pct >= 0.0 { "▲" } else { "▼" };
+                                    Some(view! {
+                                        <span class=format!("text-xs font-normal {}", cls)>
+                                            {format!("{}{:.2}%", arrow, pct.abs())}
+                                        </span>
+                                    })
+                                })
+                            }}
+                        </span>
                         <input
                             class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500 w-full"
                             prop:value=move || market_data.get().get(&sp).map(|m| m.price.clone()).unwrap_or_default()
-                            on:input=move |ev| { let v = event_target_value(&ev); market_data.update(|map| { if let Some(m) = map.get_mut(&wp) { m.price = v; } }); }
+                            on:input=move |ev| {
+                                let v = event_target_value(&ev);
+                                market_data.update(|map| { if let Some(m) = map.get_mut(&wp) { m.price = v; } });
+                            }
                             placeholder="155.00"
                         />
                         <input
                             class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500 w-full"
                             prop:value=move || market_data.get().get(&sv).map(|m| m.vol.clone()).unwrap_or_default()
-                            on:input=move |ev| { let v = event_target_value(&ev); market_data.update(|map| { if let Some(m) = map.get_mut(&wv) { m.vol = v; } }); }
+                            on:input=move |ev| {
+                                let v = event_target_value(&ev);
+                                market_data.update(|map| { if let Some(m) = map.get_mut(&wv) { m.vol = v; } });
+                            }
                             placeholder="25"
                         />
                         <input
                             class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500 w-full"
                             prop:value=move || market_data.get().get(&sr).map(|m| m.rate.clone()).unwrap_or_default()
-                            on:input=move |ev| { let v = event_target_value(&ev); market_data.update(|map| { if let Some(m) = map.get_mut(&wr) { m.rate = v; } }); }
+                            on:input=move |ev| {
+                                let v = event_target_value(&ev);
+                                market_data.update(|map| { if let Some(m) = map.get_mut(&wr) { m.rate = v; } });
+                            }
                             placeholder="5"
                         />
                     }
@@ -315,7 +526,6 @@ fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
 
     view! {
         <div class="bg-panel border border-blue-900 rounded-xl p-6 space-y-4">
-            // Top row: value + P&L
             <div class="flex items-start justify-between">
                 <div>
                     <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">"Portfolio Value"</p>
@@ -331,7 +541,6 @@ fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
                 </div>
             </div>
 
-            // Greeks row
             <div class="border-t border-border pt-4 grid grid-cols-5 gap-3">
                 <GreekStat label="Delta"  value=summary.net_delta   fmt="{:.1}" />
                 <GreekStat label="Gamma"  value=summary.net_gamma   fmt="{:.4}" />
@@ -396,7 +605,6 @@ fn PositionRow(
 
     view! {
         <div class="bg-panel border border-border rounded-lg p-3 space-y-2">
-            // Main row
             <div class="flex items-center justify-between gap-4">
                 <div class="flex items-center gap-4 min-w-0">
                     <span class="font-semibold text-sm w-14 shrink-0">{position.symbol.clone()}</span>
@@ -421,7 +629,6 @@ fn PositionRow(
                 </div>
             </div>
 
-            // Greeks row (options only, when we have data)
             {metrics.as_ref().filter(|_| is_option).map(|m| {
                 let (d, g, v, t, r) = (m.delta, m.gamma, m.vega, m.theta, m.rho);
                 view! {

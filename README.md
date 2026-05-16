@@ -6,7 +6,7 @@ A personal options portfolio manager compiled to WebAssembly. Runs entirely in t
 
 - **Pricer** — Black-Scholes pricing with full Greeks (Δ Γ ν θ ρ) and implied volatility solver
 - **Portfolio** — Track stock and option positions; live mark-to-market values and portfolio-level Greeks given current market inputs
-- **Scenarios** — What-if analysis: set assumed prices on a future date, see per-position and total P&L with a short-term/long-term tax split
+- **Scenarios** — What-if analysis: set assumed prices and vols on a future date, see effect of opening and closing positions on the overall portfolio.
 
 ## Tech
 
