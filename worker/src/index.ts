@@ -107,7 +107,7 @@ async function handleOptionQuote(url: URL, env: Env): Promise<Response> {
   if (isNaN(strike)) return jsonResp({ error: 'strike must be a number' }, 400);
 
   const row = await env.DB.prepare(`
-    SELECT mid, implied_vol
+    SELECT (bid + ask) / 2.0 AS mid, implied_vol
     FROM option_chain
     WHERE underlying = ?
       AND expiry = ?
@@ -131,7 +131,7 @@ async function handleOptionChain(url: URL, env: Env): Promise<Response> {
 
   const { results } = await env.DB.prepare(`
     SELECT symbol, underlying, expiry, option_type AS type, strike,
-           bid, ask, mid, implied_vol, delta, gamma, theta, vega,
+           bid, ask, (bid + ask) / 2.0 AS mid, implied_vol, delta, gamma, theta, vega,
            open_interest, volume
     FROM option_chain
     WHERE underlying = ?
@@ -194,23 +194,23 @@ export default {
       if (url.pathname === '/quote' && request.method === 'GET') {
         const symbol = url.searchParams.get('symbol')?.toUpperCase();
         if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
-        return handleQuote(symbol, env);
+        return await handleQuote(symbol, env);
       }
 
       if (url.pathname === '/option-quote' && request.method === 'GET') {
-        return handleOptionQuote(url, env);
+        return await handleOptionQuote(url, env);
       }
 
       if (url.pathname === '/option-chain' && request.method === 'GET') {
-        return handleOptionChain(url, env);
+        return await handleOptionChain(url, env);
       }
 
       if (url.pathname === '/option-meta' && request.method === 'GET') {
-        return handleOptionMeta(url, env);
+        return await handleOptionMeta(url, env);
       }
 
       if (url.pathname === '/close-prices' && request.method === 'GET') {
-        return handleClosePrices(url, env);
+        return await handleClosePrices(url, env);
       }
 
       return jsonResp({ error: 'Not found' }, 404);
