@@ -396,30 +396,34 @@ async function handleHistory(request: Request, env: Env): Promise<Response> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
+    try {
+      if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
 
-    if (!(await verifyToken(request, env))) return jsonResp({ error: 'Unauthorized' }, 401);
+      if (!(await verifyToken(request, env))) return jsonResp({ error: 'Unauthorized' }, 401);
 
-    const url = new URL(request.url);
+      const url = new URL(request.url);
 
-    if (url.pathname === '/quote' && request.method === 'GET') {
-      const symbol = url.searchParams.get('symbol')?.toUpperCase();
-      if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
-      return handleQuote(symbol, env);
+      if (url.pathname === '/quote' && request.method === 'GET') {
+        const symbol = url.searchParams.get('symbol')?.toUpperCase();
+        if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
+        return handleQuote(symbol, env);
+      }
+
+      if (url.pathname === '/option-quote' && request.method === 'GET') {
+        return handleOptionQuote(url, env);
+      }
+
+      if (url.pathname === '/option-chain' && request.method === 'GET') {
+        return handleOptionChain(url, env);
+      }
+
+      if (url.pathname === '/history' && request.method === 'POST') {
+        return handleHistory(request, env);
+      }
+
+      return jsonResp({ error: 'Not found' }, 404);
+    } catch (e) {
+      return jsonResp({ error: e instanceof Error ? e.message : 'Internal error' }, 500);
     }
-
-    if (url.pathname === '/option-quote' && request.method === 'GET') {
-      return handleOptionQuote(url, env);
-    }
-
-    if (url.pathname === '/option-chain' && request.method === 'GET') {
-      return handleOptionChain(url, env);
-    }
-
-    if (url.pathname === '/history' && request.method === 'POST') {
-      return handleHistory(request, env);
-    }
-
-    return jsonResp({ error: 'Not found' }, 404);
   },
 } satisfies ExportedHandler<Env>;
