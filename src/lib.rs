@@ -6,6 +6,7 @@ pub mod format;
 mod models;
 mod pages;
 mod pricing;
+mod store;
 
 use app::App;
 

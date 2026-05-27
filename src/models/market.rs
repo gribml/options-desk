@@ -15,6 +15,13 @@ pub struct OptionQuote {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OptionMetaEntry {
+    pub expiry: String,
+    pub option_type: String,  // "call" | "put"
+    pub strike: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct OptionChainEntry {
     pub symbol: String,
     pub underlying: String,

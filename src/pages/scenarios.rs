@@ -8,6 +8,8 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
 use crate::app::AuthState;
+use crate::models::market::OptionMetaEntry;
+use crate::store::MarketStore;
 use crate::models::{
     option::{OptionSpec, OptionType},
     position::Position,
@@ -578,6 +580,54 @@ fn TradeEntryRow(
     let positions = Rc::new(positions);
     let pos_for_select = Rc::clone(&positions);
 
+    // Fetch option chain metadata when symbol + is_option are set; cache in MarketStore.
+    let store = use_context::<MarketStore>().expect("MarketStore missing");
+    let option_meta = RwSignal::new(Vec::<OptionMetaEntry>::new());
+    Effect::new(move |_| {
+        let sym = entry.symbol.get().trim().to_uppercase();
+        let is_opt = entry.is_option.get();
+        if is_opt && !sym.is_empty() {
+            if let Some(cached) = store.option_meta.get_untracked().get(&sym).cloned() {
+                option_meta.set(cached);
+                return;
+            }
+            let tok = auth.token.get().unwrap_or_default();
+            spawn_local(async move {
+                match market::fetch_option_meta(&tok, &sym).await {
+                    Ok(meta) => {
+                        store.option_meta.update(|map| { map.insert(sym.clone(), meta.clone()); });
+                        option_meta.set(meta);
+                    }
+                    Err(_) => option_meta.set(vec![]),
+                }
+            });
+        } else {
+            option_meta.set(vec![]);
+        }
+    });
+
+    let expiries = Memo::new(move |_| {
+        let mut seen = std::collections::HashSet::new();
+        let mut v: Vec<String> = option_meta.get()
+            .into_iter()
+            .filter_map(|e| seen.insert(e.expiry.clone()).then_some(e.expiry))
+            .collect();
+        v.sort();
+        v
+    });
+
+    let strikes = Memo::new(move |_| {
+        let type_str = if entry.opt_type.get() == OptionType::Call { "call" } else { "put" };
+        let sel_exp = entry.expiry.get();
+        let mut v: Vec<f64> = option_meta.get()
+            .into_iter()
+            .filter(|e| e.expiry == sel_exp && e.option_type == type_str)
+            .map(|e| e.strike)
+            .collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    });
+
     let on_closes_change = {
         let positions = Rc::clone(&positions);
         let entry = entry.clone();
@@ -694,12 +744,48 @@ fn TradeEntryRow(
                             on:click=move |_| entry.opt_type.set(t)
                         >{t.label()}</button>
                     })}
-                    <input class=MICRO_CLS prop:value=move || entry.strike.get()
-                        on:input=move |ev| entry.strike.set(event_target_value(&ev))
-                        placeholder="Strike" style="width:5rem" />
-                    <input class=MICRO_CLS prop:value=move || entry.expiry.get()
-                        on:input=move |ev| entry.expiry.set(event_target_value(&ev))
-                        placeholder="Expiry YYYY-MM-DD" style="width:9rem" />
+                    {move || {
+                        if entry.closes_id.get().is_some() {
+                            // Closing trade: expiry/strike locked to the position being closed.
+                            view! {
+                                <span class="text-xs font-mono text-gray-400 px-2 py-1 border border-border rounded">
+                                    {move || entry.expiry.get()}
+                                </span>
+                                <span class="text-xs font-mono text-gray-400 px-2 py-1 border border-border rounded">
+                                    {move || format!("${}", entry.strike.get())}
+                                </span>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <select
+                                    class=MICRO_CLS
+                                    style="min-width:9rem"
+                                    prop:value=move || entry.expiry.get()
+                                    on:change=move |ev| {
+                                        entry.expiry.set(event_target_value(&ev));
+                                        entry.strike.set(String::new());
+                                    }
+                                >
+                                    <option value="">"— expiry —"</option>
+                                    {move || expiries.get().into_iter().map(|exp| {
+                                        view! { <option value=exp.clone()>{exp.clone()}</option> }
+                                    }).collect_view()}
+                                </select>
+                                <select
+                                    class=MICRO_CLS
+                                    style="min-width:6rem"
+                                    prop:value=move || entry.strike.get()
+                                    on:change=move |ev| entry.strike.set(event_target_value(&ev))
+                                >
+                                    <option value="">"— strike —"</option>
+                                    {move || strikes.get().into_iter().map(|s| {
+                                        let val = format!("{}", s);
+                                        view! { <option value=val.clone()>{format!("${:.0}", s)}</option> }
+                                    }).collect_view()}
+                                </select>
+                            }.into_any()
+                        }
+                    }}
                 </div>
             })}
 

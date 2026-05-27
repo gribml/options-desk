@@ -142,6 +142,24 @@ async function handleOptionChain(url: URL, env: Env): Promise<Response> {
   return jsonResp(results);
 }
 
+// GET /option-meta?symbol=AAPL
+// Returns distinct (expiry, option_type, strike) tuples from the latest snapshot.
+// Lighter than /option-chain — used to populate expiry/strike dropdowns in the UI.
+async function handleOptionMeta(url: URL, env: Env): Promise<Response> {
+  const symbol = url.searchParams.get('symbol')?.toUpperCase();
+  if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
+
+  const { results } = await env.DB.prepare(`
+    SELECT DISTINCT expiry, option_type, strike
+    FROM option_chain
+    WHERE underlying = ?
+      AND snapshot_time = (SELECT MAX(snapshot_time) FROM option_chain WHERE underlying = ?)
+    ORDER BY expiry, option_type, strike
+  `).bind(symbol, symbol).all<{ expiry: string; option_type: string; strike: number }>();
+
+  return jsonResp(results);
+}
+
 // GET /close-prices?symbol=AAPL&limit=31
 // Returns daily close prices (most recent first) derived from bars_1min.
 async function handleClosePrices(url: URL, env: Env): Promise<Response> {
@@ -185,6 +203,10 @@ export default {
 
       if (url.pathname === '/option-chain' && request.method === 'GET') {
         return handleOptionChain(url, env);
+      }
+
+      if (url.pathname === '/option-meta' && request.method === 'GET') {
+        return handleOptionMeta(url, env);
       }
 
       if (url.pathname === '/close-prices' && request.method === 'GET') {

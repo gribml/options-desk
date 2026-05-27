@@ -9,6 +9,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::supabase::{self, AuthResponse};
 use crate::components::nav::Nav;
+use crate::store::MarketStore;
 use crate::pages::{
     login::LoginPage, portfolio::PortfolioPage, pricer::PricerPage, scenarios::ScenariosPage,
 };
@@ -84,6 +85,7 @@ impl AuthState {
 pub fn App() -> impl IntoView {
     let auth = AuthState::load();
     provide_context(auth);
+    provide_context(MarketStore::new());
 
     // If we have a stored refresh token, immediately exchange it for a fresh
     // access token (handles returning after hours) then start the 45-min loop.

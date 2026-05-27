@@ -1,7 +1,7 @@
 use gloo_net::http::Request;
 
 use crate::config::WORKER_URL;
-use crate::models::market::{OptionChainEntry, OptionQuote, Quote};
+use crate::models::market::{OptionChainEntry, OptionMetaEntry, OptionQuote, Quote};
 
 // ── Live quotes ───────────────────────────────────────────────────────────────
 
@@ -74,6 +74,25 @@ pub async fn fetch_option_chain(token: &str, symbol: &str) -> Result<Vec<OptionC
     } else {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         Err(body["error"].as_str().unwrap_or("Option chain fetch failed").to_string())
+    }
+}
+
+// ── Option chain metadata (for expiry/strike dropdowns) ──────────────────────
+
+/// Returns distinct (expiry, option_type, strike) tuples from the latest snapshot.
+pub async fn fetch_option_meta(token: &str, symbol: &str) -> Result<Vec<OptionMetaEntry>, String> {
+    let url = format!("{}/option-meta?symbol={}", worker_base(), symbol);
+    let resp = Request::get(&url)
+        .header("Authorization", &format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.ok() {
+        resp.json::<Vec<OptionMetaEntry>>().await.map_err(|e| e.to_string())
+    } else {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Err(body["error"].as_str().unwrap_or("Option meta fetch failed").to_string())
     }
 }
 

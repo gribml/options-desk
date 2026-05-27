@@ -10,6 +10,8 @@ use wasm_bindgen_futures::spawn_local;
 use crate::api::{market, supabase};
 use crate::app::AuthState;
 use crate::format::{fmt_cash, Num};
+use crate::models::market::OptionMetaEntry;
+use crate::store::MarketStore;
 use crate::models::{
     option::{OptionSpec, OptionType},
     position::{Position, PositionKind},
@@ -161,6 +163,7 @@ fn summarize(positions: &[Position], metrics: &[Option<PositionMetrics>]) -> Por
 #[component]
 pub fn PortfolioPage() -> impl IntoView {
     let auth = use_context::<AuthState>().expect("AuthState missing");
+    let store = use_context::<MarketStore>().expect("MarketStore missing");
     let positions = RwSignal::new(Vec::<Position>::new());
     let loading = RwSignal::new(true);
     let error = RwSignal::new(Option::<String>::None);
@@ -215,10 +218,26 @@ pub fn PortfolioPage() -> impl IntoView {
                         positions.set(ps);
 
                         if !syms.is_empty() {
-                            quote_loading.set(true);
-                            let quotes = market::fetch_quotes(&tok, &syms).await;
-                            apply_quotes(quotes);
-                            quote_loading.set(false);
+                            // Apply any already-cached quotes immediately.
+                            let cached: Vec<_> = syms.iter()
+                                .filter_map(|s| store.quotes.get_untracked().get(s).cloned())
+                                .collect();
+                            if !cached.is_empty() { apply_quotes(cached); }
+
+                            // Fetch only the symbols not yet in the cache.
+                            let missing: Vec<String> = syms.iter()
+                                .filter(|s| !store.quotes.get_untracked().contains_key(*s))
+                                .cloned()
+                                .collect();
+                            if !missing.is_empty() {
+                                quote_loading.set(true);
+                                let fetched = market::fetch_quotes(&tok, &missing).await;
+                                store.quotes.update(|map| {
+                                    for q in &fetched { map.insert(q.symbol.clone(), q.clone()); }
+                                });
+                                apply_quotes(fetched);
+                                quote_loading.set(false);
+                            }
                         }
 
                         // Fetch each option contract's live price concurrently.
@@ -286,6 +305,9 @@ pub fn PortfolioPage() -> impl IntoView {
         let tok1 = token.clone();
         spawn_local(async move {
             let quotes = market::fetch_quotes(&tok1, &syms).await;
+            store.quotes.update(|map| {
+                for q in &quotes { map.insert(q.symbol.clone(), q.clone()); }
+            });
             apply_quotes(quotes);
             quote_loading.set(false);
         });
@@ -637,11 +659,35 @@ fn AddPositionForm(
     let kind      = RwSignal::new(PositionKind::Stock);
     let quantity  = RwSignal::new("1".to_string());
     let cost_basis = RwSignal::new(String::new());
-    let opt_type  = RwSignal::new(OptionType::Call);
-    let strike    = RwSignal::new(String::new());
-    let expiry    = RwSignal::new(String::new());
-    let err       = RwSignal::new(Option::<String>::None);
-    let saving    = RwSignal::new(false);
+    let opt_type    = RwSignal::new(OptionType::Call);
+    let strike      = RwSignal::new(String::new());
+    let expiry      = RwSignal::new(String::new());
+    let err         = RwSignal::new(Option::<String>::None);
+    let saving      = RwSignal::new(false);
+    let option_meta = RwSignal::new(Vec::<OptionMetaEntry>::new());
+
+    let store = use_context::<MarketStore>().expect("MarketStore missing");
+    Effect::new(move |_| {
+        let sym = symbol.get().trim().to_uppercase();
+        if kind.get() == PositionKind::Option && !sym.is_empty() {
+            if let Some(cached) = store.option_meta.get_untracked().get(&sym).cloned() {
+                option_meta.set(cached);
+                return;
+            }
+            let tok = auth.token.get().unwrap_or_default();
+            spawn_local(async move {
+                match market::fetch_option_meta(&tok, &sym).await {
+                    Ok(meta) => {
+                        store.option_meta.update(|map| { map.insert(sym.clone(), meta.clone()); });
+                        option_meta.set(meta);
+                    }
+                    Err(_) => option_meta.set(vec![]),
+                }
+            });
+        } else {
+            option_meta.set(vec![]);
+        }
+    });
 
     let on_submit = move |ev: web_sys::SubmitEvent| {
         ev.prevent_default();
@@ -717,23 +763,69 @@ fn AddPositionForm(
                 <MiniInput label="Quantity (neg=short)" signal=quantity  ph="1" />
                 <MiniInput label="Cost basis / share"  signal=cost_basis ph="0.00" />
 
-                {move || (kind.get() == PositionKind::Option).then(|| view! {
-                    <>
-                        <div class="col-span-2 flex gap-2">
-                            {[OptionType::Call, OptionType::Put].map(|t| view! {
-                                <button type="button"
-                                    class=move || format!(
-                                        "px-4 py-1 rounded text-xs border transition-colors {}",
-                                        if opt_type.get() == t { "bg-blue-600 border-blue-600 text-white" }
-                                        else { "bg-surface border-border text-gray-400" }
-                                    )
-                                    on:click=move |_| opt_type.set(t)
-                                >{t.label()}</button>
-                            })}
-                        </div>
-                        <MiniInput label="Strike"               signal=strike ph="150.00" />
-                        <MiniInput label="Expiry (YYYY-MM-DD)"  signal=expiry ph="2025-01-17" />
-                    </>
+                {move || (kind.get() == PositionKind::Option).then(|| {
+                    let meta = option_meta.get();
+
+                    let mut seen = std::collections::HashSet::new();
+                    let mut expiries: Vec<String> = meta.iter()
+                        .filter_map(|e| seen.insert(e.expiry.clone()).then_some(e.expiry.clone()))
+                        .collect();
+                    expiries.sort();
+
+                    let type_str = if opt_type.get() == OptionType::Call { "call" } else { "put" };
+                    let sel_exp = expiry.get();
+                    let mut strikes: Vec<f64> = meta.iter()
+                        .filter(|e| e.expiry == sel_exp && e.option_type == type_str)
+                        .map(|e| e.strike)
+                        .collect();
+                    strikes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+                    view! {
+                        <>
+                            <div class="col-span-2 flex gap-2">
+                                {[OptionType::Call, OptionType::Put].map(|t| view! {
+                                    <button type="button"
+                                        class=move || format!(
+                                            "px-4 py-1 rounded text-xs border transition-colors {}",
+                                            if opt_type.get() == t { "bg-blue-600 border-blue-600 text-white" }
+                                            else { "bg-surface border-border text-gray-400" }
+                                        )
+                                        on:click=move |_| opt_type.set(t)
+                                    >{t.label()}</button>
+                                })}
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">"Expiry"</label>
+                                <select
+                                    class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                                    prop:value=move || expiry.get()
+                                    on:change=move |ev| {
+                                        expiry.set(event_target_value(&ev));
+                                        strike.set(String::new());
+                                    }
+                                >
+                                    <option value="">"— select expiry —"</option>
+                                    {expiries.into_iter().map(|exp| {
+                                        view! { <option value=exp.clone()>{exp.clone()}</option> }
+                                    }).collect_view()}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">"Strike"</label>
+                                <select
+                                    class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                                    prop:value=move || strike.get()
+                                    on:change=move |ev| strike.set(event_target_value(&ev))
+                                >
+                                    <option value="">"— select strike —"</option>
+                                    {strikes.into_iter().map(|s| {
+                                        let val = format!("{}", s);
+                                        view! { <option value=val.clone()>{format!("${:.0}", s)}</option> }
+                                    }).collect_view()}
+                                </select>
+                            </div>
+                        </>
+                    }
                 })}
             </div>
 
