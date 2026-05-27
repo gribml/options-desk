@@ -107,13 +107,13 @@ async function handleOptionQuote(url: URL, env: Env): Promise<Response> {
   if (isNaN(strike)) return jsonResp({ error: 'strike must be a number' }, 400);
 
   const row = await env.DB.prepare(`
-    SELECT (bid + ask) / 2.0 AS mid, implied_vol
+    SELECT (bid + ask) / 2.0 AS mid, implied_volatility AS implied_vol
     FROM option_chain
     WHERE underlying = ?
-      AND expiry = ?
+      AND expiration = ?
       AND option_type = ?
       AND strike = ?
-    ORDER BY snapshot_time DESC
+    ORDER BY snapshot_date DESC
     LIMIT 1
   `).bind(symbol, expiry, type, strike)
     .first<{ mid: number | null; implied_vol: number | null }>();
@@ -130,13 +130,14 @@ async function handleOptionChain(url: URL, env: Env): Promise<Response> {
   if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
 
   const { results } = await env.DB.prepare(`
-    SELECT symbol, underlying, expiry, option_type AS type, strike,
-           bid, ask, (bid + ask) / 2.0 AS mid, implied_vol, delta, gamma, theta, vega,
-           open_interest, volume
+    SELECT symbol, underlying, expiration AS expiry, option_type AS type, strike,
+           bid, ask, (bid + ask) / 2.0 AS mid, implied_volatility AS implied_vol,
+           delta, gamma, theta, vega,
+           NULL AS open_interest, NULL AS volume
     FROM option_chain
     WHERE underlying = ?
-      AND snapshot_time = (SELECT MAX(snapshot_time) FROM option_chain WHERE underlying = ?)
-    ORDER BY expiry, option_type, strike
+      AND snapshot_date = (SELECT MAX(snapshot_date) FROM option_chain WHERE underlying = ?)
+    ORDER BY expiration, option_type, strike
   `).bind(symbol, symbol).all<OptionChainEntry>();
 
   return jsonResp(results);
@@ -150,11 +151,11 @@ async function handleOptionMeta(url: URL, env: Env): Promise<Response> {
   if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
 
   const { results } = await env.DB.prepare(`
-    SELECT DISTINCT expiry, option_type, strike
+    SELECT DISTINCT expiration AS expiry, option_type, strike
     FROM option_chain
     WHERE underlying = ?
-      AND snapshot_time = (SELECT MAX(snapshot_time) FROM option_chain WHERE underlying = ?)
-    ORDER BY expiry, option_type, strike
+      AND snapshot_date = (SELECT MAX(snapshot_date) FROM option_chain WHERE underlying = ?)
+    ORDER BY expiration, option_type, strike
   `).bind(symbol, symbol).all<{ expiry: string; option_type: string; strike: number }>();
 
   return jsonResp(results);
