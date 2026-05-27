@@ -72,10 +72,10 @@ async function verifyToken(request: Request, env: Env): Promise<boolean> {
 // Returns the latest price and day-over-day change from bars_1min.
 async function handleQuote(symbol: string, env: Env): Promise<Response> {
   const { results } = await env.DB.prepare(`
-    SELECT date(ts) AS day, close
+    SELECT date(timestamp) AS day, close
     FROM bars_1min
     WHERE symbol = ?
-      AND ts IN (SELECT MAX(ts) FROM bars_1min WHERE symbol = ? GROUP BY date(ts))
+      AND timestamp IN (SELECT MAX(timestamp) FROM bars_1min WHERE symbol = ? GROUP BY date(timestamp))
     ORDER BY day DESC
     LIMIT 2
   `).bind(symbol, symbol).all<{ day: string; close: number }>();
@@ -172,8 +172,8 @@ async function handleClosePrices(url: URL, env: Env): Promise<Response> {
     SELECT close
     FROM bars_1min
     WHERE symbol = ?
-      AND ts IN (SELECT MAX(ts) FROM bars_1min WHERE symbol = ? GROUP BY date(ts))
-    ORDER BY date(ts) DESC
+      AND timestamp IN (SELECT MAX(timestamp) FROM bars_1min WHERE symbol = ? GROUP BY date(timestamp))
+    ORDER BY date(timestamp) DESC
     LIMIT ?
   `).bind(symbol, symbol, limit).all<{ close: number }>();
 
