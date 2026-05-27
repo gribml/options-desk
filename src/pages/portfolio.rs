@@ -9,7 +9,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
 use crate::app::AuthState;
-use crate::format::{fmt_cash, fmt_currency};
+use crate::format::{fmt_cash, Num};
 use crate::models::{
     option::{OptionSpec, OptionType},
     position::{Position, PositionKind},
@@ -530,13 +530,13 @@ fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
                 <div>
                     <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">"Portfolio Value"</p>
                     <p class="text-3xl font-semibold">
-                        {fmt_currency(summary.total_value)}
+                        <Num value=summary.total_value />
                     </p>
                 </div>
                 <div class="text-right">
                     <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">"Unrealised P&L"</p>
                     <p class=format!("text-2xl font-semibold {}", pnl_class)>
-                        {fmt_cash(summary.total_pnl)}
+                        <Num value=summary.total_pnl signed=true />
                     </p>
                 </div>
             </div>
@@ -589,18 +589,12 @@ fn PositionRow(
 
     let qty_class = if position.quantity >= 0 { "text-green-400" } else { "text-red-400" };
 
-    let (mark_str, value_str, pnl_str, pnl_class) = match &metrics {
-        Some(m) => {
-            let pc = if m.pnl >= 0.0 { "text-green-400" } else { "text-red-400" };
-            (
-                format!("${:.2}", m.mark_price),
-                fmt_currency(m.mark_value),
-                fmt_cash(m.pnl),
-                pc,
-            )
-        }
-        None => ("—".into(), "—".into(), "—".into(), "text-gray-500"),
+    let (mark_str, pnl_class) = match &metrics {
+        Some(m) => (format!("${:.2}", m.mark_price), if m.pnl >= 0.0 { "text-green-400" } else { "text-red-400" }),
+        None => ("—".into(), "text-gray-500"),
     };
+    let mark_value = metrics.as_ref().map(|m| m.mark_value);
+    let pnl_value  = metrics.as_ref().map(|m| m.pnl);
 
     view! {
         <div class="bg-panel border border-border rounded-lg p-3 space-y-2">
@@ -617,8 +611,18 @@ fn PositionRow(
                 </div>
                 <div class="flex items-center gap-4 shrink-0">
                     <span class="text-xs text-gray-400">"mark " {mark_str}</span>
-                    <span class="text-sm font-medium">{value_str}</span>
-                    <span class=format!("text-sm font-medium {}", pnl_class)>{pnl_str}</span>
+                    <span class="text-sm font-medium">
+                        {match mark_value {
+                            Some(v) => view! { <Num value=v /> }.into_any(),
+                            None    => "—".into_any(),
+                        }}
+                    </span>
+                    <span class=format!("text-sm font-medium {}", pnl_class)>
+                        {match pnl_value {
+                            Some(v) => view! { <Num value=v signed=true /> }.into_any(),
+                            None    => "—".into_any(),
+                        }}
+                    </span>
                     <button
                         class="text-gray-600 hover:text-red-400 text-xs transition-colors"
                         on:click=move |_| on_delete()

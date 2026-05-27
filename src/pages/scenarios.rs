@@ -825,7 +825,7 @@ fn ScenarioCard(
                 <div class="flex items-center gap-2 shrink-0">
                     <div class="text-right mr-2">
                         <p class="text-xs text-gray-500">"Net cash"</p>
-                        <p class=format!("text-lg font-semibold {}", cash_class)>{fmt_cash(net_cash)}</p>
+                        <p class=format!("text-lg font-semibold {}", cash_class)><Num value=net_cash signed=true /></p>
                     </div>
                     <button
                         class="text-xs text-gray-500 hover:text-blue-400 border border-border rounded px-2 py-1 transition-colors"
@@ -911,7 +911,7 @@ fn ScenarioCard(
                         </div>
                         <div class="text-right">
                             <p class="text-gray-500 mb-1">"After-tax net cash"</p>
-                            <p class=format!("text-xl font-semibold {}", at_class)>{fmt_cash(after_tax_cash)}</p>
+                            <p class=format!("text-xl font-semibold {}", at_class)><Num value=after_tax_cash signed=true /></p>
                         </div>
                     </div>
 
@@ -933,7 +933,7 @@ fn ScenarioCard(
     }
 }
 
-use crate::format::fmt_cash;
+use crate::format::{fmt_cash, Num};
 
 // ── Shared form components ────────────────────────────────────────────────────
 
