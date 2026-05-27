@@ -8,7 +8,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
 use crate::app::AuthState;
-use crate::models::market::OptionMetaEntry;
+use crate::models::market::{OptionChainEntry, OptionMetaEntry};
 use crate::store::MarketStore;
 use crate::models::{
     option::{OptionSpec, OptionType},
@@ -107,6 +107,36 @@ fn bs_price(spec: &OptionSpec, mi: &ScenarioMarketInput, eval_date: NaiveDate) -
     }
     Some(BsInputs { spot: mi.price, strike: spec.strike, expiry_years: t, vol: mi.vol, rate: mi.rate }
         .price(spec.option_type))
+}
+
+// Derives ATM implied vol from the nearest-expiry straddle in the option chain.
+// Returns the average of the ATM call and put IVs (or whichever is available).
+fn atm_iv_from_chain(chain: &[OptionChainEntry], spot: f64) -> Option<f64> {
+    let today = Utc::now().date_naive();
+    let nearest_expiry = chain.iter()
+        .filter_map(|e| NaiveDate::parse_from_str(&e.expiry, "%Y-%m-%d").ok())
+        .filter(|&d| d > today)
+        .min()?;
+    let exp_str = nearest_expiry.format("%Y-%m-%d").to_string();
+
+    let best_call_iv = chain.iter()
+        .filter(|e| e.expiry == exp_str && e.option_type == "call" && e.implied_vol.is_some())
+        .min_by(|a, b| (a.strike - spot).abs().partial_cmp(&(b.strike - spot).abs())
+            .unwrap_or(std::cmp::Ordering::Equal))
+        .and_then(|e| e.implied_vol);
+
+    let best_put_iv = chain.iter()
+        .filter(|e| e.expiry == exp_str && e.option_type == "put" && e.implied_vol.is_some())
+        .min_by(|a, b| (a.strike - spot).abs().partial_cmp(&(b.strike - spot).abs())
+            .unwrap_or(std::cmp::Ordering::Equal))
+        .and_then(|e| e.implied_vol);
+
+    match (best_call_iv, best_put_iv) {
+        (Some(c), Some(p)) => Some((c + p) / 2.0),
+        (Some(c), None)    => Some(c),
+        (None,    Some(p)) => Some(p),
+        (None,    None)    => None,
+    }
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────
@@ -500,13 +530,14 @@ fn ScenarioForm(
                         let token = auth.token.get().unwrap_or_default();
                         let me2 = me_fill.clone();
                         spawn_local(async move {
-                            // Live price
-                            if let Ok(q) = market::fetch_quote(&token, &sym).await {
-                                me2.price.set(format!("{:.2}", q.price));
-                            }
-                            // 30-day realized vol from stored history
-                            if let Ok(closes) = market::fetch_close_prices(&token, &sym, 31).await {
-                                if let Some(vol) = market::realized_vol(&closes, 30) {
+                            // Live spot price
+                            let spot = match market::fetch_quote(&token, &sym).await {
+                                Ok(q) => { me2.price.set(format!("{:.2}", q.price)); q.price }
+                                Err(_) => return,
+                            };
+                            // ATM forward vol: nearest-expiry straddle from live option chain
+                            if let Ok(chain) = market::fetch_option_chain(&token, &sym).await {
+                                if let Some(vol) = atm_iv_from_chain(&chain, spot) {
                                     me2.vol.set(format!("{:.1}", vol * 100.0));
                                 }
                             }
@@ -521,7 +552,7 @@ fn ScenarioForm(
                             <button type="button"
                                 class="text-gray-500 hover:text-blue-300 text-xs border border-border rounded px-1.5 py-1 transition-colors"
                                 on:click=fill
-                                title="Fill price from live quote; fill IV from 30-day realised vol (requires history sync)"
+                                title="Fill spot price from live quote; fill IV from ATM straddle (nearest expiry)"
                             >"↗"</button>
                             <button type="button" class="text-gray-600 hover:text-red-400 text-xs"
                                 on:click=move |_| market_entries.update(|v| { if v.len() > 1 { v.remove(i); } })>
@@ -660,34 +691,23 @@ fn TradeEntryRow(
         let strike: f64 = match entry_for_compute.strike.get().trim().parse() {
             Ok(v) => v, Err(_) => return,
         };
-        let expiry_str = entry_for_compute.expiry.get().trim().to_string();
-        if expiry_str.is_empty() { return; }
+        let expiry_str = entry_for_compute.expiry.get();
+        if expiry_str.trim().is_empty() { return; }
         let opt_type = entry_for_compute.opt_type.get();
-        let entry2 = entry_for_compute.clone();
-        let token = auth.token.get().unwrap_or_default();
-        let market_entries2 = market_entries;
-        let eval_date2 = eval_date;
 
-        spawn_local(async move {
-            let type_str = match opt_type { OptionType::Call => "call", OptionType::Put => "put" };
-            // Try live market price; fall back to B-S if unavailable.
-            if let Ok(oq) = market::fetch_option_quote(&token, &sym, &expiry_str, type_str, strike).await {
-                entry2.price.set(format!("{:.4}", oq.price));
-                return;
-            }
-            let mi = market_entries2.get().into_iter()
-                .find(|m| m.symbol.get().trim().to_uppercase() == sym)
-                .and_then(|m| m.as_mi());
-            let ed = NaiveDate::parse_from_str(eval_date2.get().trim(), "%Y-%m-%d").ok();
-            if let (Some(mi), Some(ed)) = (mi, ed) {
-                if let Ok(exp) = NaiveDate::parse_from_str(&expiry_str, "%Y-%m-%d") {
-                    let spec = OptionSpec { symbol: sym, option_type: opt_type, strike, expiry: exp };
-                    if let Some(p) = bs_price(&spec, &mi, ed) {
-                        entry2.price.set(format!("{:.4}", p));
-                    }
+        // Always price via B-S at eval_date using the scenario's market inputs.
+        let mi = market_entries.get().into_iter()
+            .find(|m| m.symbol.get().trim().to_uppercase() == sym)
+            .and_then(|m| m.as_mi());
+        let ed = NaiveDate::parse_from_str(eval_date.get().trim(), "%Y-%m-%d").ok();
+        if let (Some(mi), Some(ed)) = (mi, ed) {
+            if let Ok(exp) = NaiveDate::parse_from_str(expiry_str.trim(), "%Y-%m-%d") {
+                let spec = OptionSpec { symbol: sym, option_type: opt_type, strike, expiry: exp };
+                if let Some(p) = bs_price(&spec, &mi, ed) {
+                    entry_for_compute.price.set(format!("{:.4}", p));
                 }
             }
-        });
+        }
     };
 
     view! {
