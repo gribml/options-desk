@@ -119,7 +119,6 @@ pub fn ScenariosPage() -> impl IntoView {
     let show_new   = RwSignal::new(false);
     let show_archived = RwSignal::new(false);
     let editing_id = RwSignal::new(Option::<Uuid>::None);
-    let sync_loading = RwSignal::new(false);
 
     Effect::new(move |_| {
         let token = auth.token.get();
@@ -137,46 +136,19 @@ pub fn ScenariosPage() -> impl IntoView {
         } else { loading.set(false); }
     });
 
-    let sync_history = move || {
-        let token = auth.token.get_untracked().unwrap_or_default();
-        let syms: Vec<String> = scenarios.get_untracked()
-            .into_iter()
-            .filter(|s| !s.archived)
-            .flat_map(|s| s.market_inputs.into_iter().map(|mi| mi.symbol))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        if syms.is_empty() { return; }
-        sync_loading.set(true);
-        spawn_local(async move {
-            let _ = market::trigger_history_sync(&token, &syms).await;
-            sync_loading.set(false);
-        });
-    };
-
     view! {
         <div class="space-y-6">
             <div class="flex items-center justify-between">
                 <h1 class="text-xl font-semibold">"Scenarios"</h1>
-                <div class="flex items-center gap-3">
-                    <button
-                        class="text-xs text-gray-500 hover:text-purple-300 disabled:opacity-40 transition-colors"
-                        prop:disabled=move || sync_loading.get()
-                        on:click=move |_| sync_history()
-                        title="Fetch 2-year daily history for all scenario symbols"
-                    >
-                        {move || if sync_loading.get() { "Syncing…" } else { "⟳ Sync history" }}
-                    </button>
-                    <button
-                        class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
-                        on:click=move |_| {
-                            editing_id.set(None);
-                            show_new.update(|v| *v = !*v);
-                        }
-                    >
-                        {move || if show_new.get() || editing_id.get().is_some() { "Cancel" } else { "+ New scenario" }}
-                    </button>
-                </div>
+                <button
+                    class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
+                    on:click=move |_| {
+                        editing_id.set(None);
+                        show_new.update(|v| *v = !*v);
+                    }
+                >
+                    {move || if show_new.get() || editing_id.get().is_some() { "Cancel" } else { "+ New scenario" }}
+                </button>
             </div>
 
             // New scenario form

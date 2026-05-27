@@ -1,10 +1,9 @@
 use gloo_net::http::Request;
-use serde::Deserialize;
 
-use crate::config::{SUPABASE_ANON_KEY, SUPABASE_URL, WORKER_URL};
+use crate::config::WORKER_URL;
 use crate::models::market::{OptionChainEntry, OptionQuote, Quote};
 
-// ── Live quotes (via Cloudflare Worker → Polygon) ────────────────────────────
+// ── Live quotes ───────────────────────────────────────────────────────────────
 
 pub async fn fetch_quote(token: &str, symbol: &str) -> Result<Quote, String> {
     let url = format!("{}/quote?symbol={}", worker_base(), symbol);
@@ -33,26 +32,18 @@ pub async fn fetch_quotes(token: &str, symbols: &[String]) -> Vec<Quote> {
     out
 }
 
-// ── Option quotes (via Cloudflare Worker → Polygon) ──────────────────────────
+// ── Option quotes ─────────────────────────────────────────────────────────────
 
-/// Fetches the live mid-price (bid+ask)/2 for a specific options contract.
-/// `option_type` is `"call"` or `"put"`.
-/// Returns Err if the contract is not found or if the provider plan doesn't
-/// include options — callers should fall back to B-S in that case.
 pub async fn fetch_option_quote(
     token: &str,
     symbol: &str,
-    expiry: &str,       // YYYY-MM-DD
-    option_type: &str,  // "call" | "put"
+    expiry: &str,
+    option_type: &str,
     strike: f64,
 ) -> Result<OptionQuote, String> {
     let url = format!(
         "{}/option-quote?symbol={}&expiry={}&type={}&strike={}",
-        worker_base(),
-        symbol,
-        expiry,
-        option_type,
-        strike,
+        worker_base(), symbol, expiry, option_type, strike,
     );
     let resp = Request::get(&url)
         .header("Authorization", &format!("Bearer {}", token))
@@ -70,10 +61,7 @@ pub async fn fetch_option_quote(
 
 // ── Option chain ──────────────────────────────────────────────────────────────
 
-pub async fn fetch_option_chain(
-    token: &str,
-    symbol: &str,
-) -> Result<Vec<OptionChainEntry>, String> {
+pub async fn fetch_option_chain(token: &str, symbol: &str) -> Result<Vec<OptionChainEntry>, String> {
     let url = format!("{}/option-chain?symbol={}", worker_base(), symbol);
     let resp = Request::get(&url)
         .header("Authorization", &format!("Bearer {}", token))
@@ -89,65 +77,22 @@ pub async fn fetch_option_chain(
     }
 }
 
-// ── Historical data sync (via Cloudflare Worker → Alpaca → Supabase) ────────
-
-/// Triggers the worker to fetch 2 years of daily bars for each symbol and
-/// store them in the Supabase price_history table.
-/// Returns the per-symbol result map from the worker (e.g. "ok (504 bars)").
-pub async fn trigger_history_sync(
-    token: &str,
-    symbols: &[String],
-) -> Result<serde_json::Value, String> {
-    let url = format!("{}/history", worker_base());
-    let body = serde_json::json!({ "symbols": symbols });
-    let resp = Request::post(&url)
-        .header("Authorization", &format!("Bearer {}", token))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if resp.ok() {
-        resp.json::<serde_json::Value>().await.map_err(|e| e.to_string())
-    } else {
-        Err(format!("History sync failed: {}", resp.status()))
-    }
-}
-
-// ── Price history reads (direct from Supabase) ────────────────────────────────
-
-#[derive(Deserialize)]
-struct BarRow {
-    close: f64,
-}
+// ── Close prices (for realised vol) ──────────────────────────────────────────
 
 /// Returns close prices in descending date order (most recent first).
-pub async fn fetch_close_prices(
-    token: &str,
-    symbol: &str,
-    limit: usize,
-) -> Result<Vec<f64>, String> {
-    let url = format!(
-        "{}/rest/v1/price_history?symbol=eq.{}&select=close&order=date.desc&limit={}",
-        supabase_rest_base(),
-        symbol,
-        limit,
-    );
+pub async fn fetch_close_prices(token: &str, symbol: &str, limit: usize) -> Result<Vec<f64>, String> {
+    let url = format!("{}/close-prices?symbol={}&limit={}", worker_base(), symbol, limit);
     let resp = Request::get(&url)
-        .header("apikey", SUPABASE_ANON_KEY)
         .header("Authorization", &format!("Bearer {}", token))
-        .header("Accept", "application/json")
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
     if resp.ok() {
-        let rows: Vec<BarRow> = resp.json().await.map_err(|e| e.to_string())?;
-        Ok(rows.into_iter().map(|r| r.close).collect())
+        resp.json::<Vec<f64>>().await.map_err(|e| e.to_string())
     } else {
-        Err(format!("Fetch close prices failed: {}", resp.status()))
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Err(body["error"].as_str().unwrap_or("Close prices fetch failed").to_string())
     }
 }
 
@@ -155,7 +100,6 @@ pub async fn fetch_close_prices(
 
 /// Computes annualised realised volatility from `lookback` daily log-returns.
 /// `closes` must be in descending date order (most recent first).
-/// Returns None if there is insufficient data.
 pub fn realized_vol(closes: &[f64], lookback: usize) -> Option<f64> {
     if closes.len() < lookback + 1 {
         return None;
@@ -168,17 +112,8 @@ pub fn realized_vol(closes: &[f64], lookback: usize) -> Option<f64> {
     Some(var.sqrt() * 252_f64.sqrt())
 }
 
-// ── URL helpers ───────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn worker_base() -> String {
     WORKER_URL.trim_end_matches('/').to_string()
-}
-
-fn supabase_rest_base() -> String {
-    SUPABASE_URL
-        .trim_end_matches('/')
-        .trim_end_matches("/rest/v1")
-        .trim_end_matches('/')
-        .to_string()
-        + "/rest/v1"
 }

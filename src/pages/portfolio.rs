@@ -167,7 +167,6 @@ pub fn PortfolioPage() -> impl IntoView {
     let show_add = RwSignal::new(false);
     let market_data = RwSignal::new(HashMap::<String, MarketData>::new());
     let quote_loading = RwSignal::new(false);
-    let sync_loading = RwSignal::new(false);
     // Actual market prices for option positions, keyed by position ID.
     let option_prices = RwSignal::new(HashMap::<Uuid, f64>::new());
 
@@ -318,24 +317,6 @@ pub fn PortfolioPage() -> impl IntoView {
         }
     };
 
-    // Trigger the worker to fetch 2yr history for all portfolio symbols.
-    let sync_history = move || {
-        let token = auth.token.get_untracked().unwrap_or_default();
-        let syms: Vec<String> = positions
-            .get_untracked()
-            .iter()
-            .map(|p| p.symbol.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        if syms.is_empty() { return; }
-        sync_loading.set(true);
-        spawn_local(async move {
-            let _ = market::trigger_history_sync(&token, &syms).await;
-            sync_loading.set(false);
-        });
-    };
-
     view! {
         <div class="space-y-6">
 
@@ -378,9 +359,7 @@ pub fn PortfolioPage() -> impl IntoView {
                         symbols=syms
                         market_data=market_data
                         quote_loading=quote_loading
-                        sync_loading=sync_loading
                         on_refresh_quotes=move || refresh_quotes()
-                        on_sync_history=move || sync_history()
                     />
                 })
             }}
@@ -430,32 +409,19 @@ fn MarketInputsPanel(
     symbols: Vec<String>,
     market_data: RwSignal<HashMap<String, MarketData>>,
     quote_loading: RwSignal<bool>,
-    sync_loading: RwSignal<bool>,
     on_refresh_quotes: impl Fn() + 'static,
-    on_sync_history: impl Fn() + 'static,
 ) -> impl IntoView {
     view! {
         <div class="bg-panel border border-border rounded-xl p-4 space-y-3">
             <div class="flex items-center justify-between">
                 <p class="text-xs font-medium text-gray-400 uppercase tracking-wider">"Market Inputs"</p>
-                <div class="flex items-center gap-3">
-                    <button
-                        class="text-xs text-gray-500 hover:text-purple-300 disabled:opacity-40 transition-colors"
-                        prop:disabled=move || sync_loading.get()
-                        on:click=move |_| on_sync_history()
-                        title="Fetch 2-year daily history for all symbols via Cloudflare Worker"
-                    >
-                        {move || if sync_loading.get() { "Syncing history…" } else { "⟳ Sync history" }}
-                    </button>
-                    <button
-                        class="text-xs text-gray-500 hover:text-blue-300 disabled:opacity-40 transition-colors"
-                        prop:disabled=move || quote_loading.get()
-                        on:click=move |_| on_refresh_quotes()
-                        title="Refresh live quotes from Polygon.io"
-                    >
-                        {move || if quote_loading.get() { "Refreshing…" } else { "↻ Refresh quotes" }}
-                    </button>
-                </div>
+                <button
+                    class="text-xs text-gray-500 hover:text-blue-300 disabled:opacity-40 transition-colors"
+                    prop:disabled=move || quote_loading.get()
+                    on:click=move |_| on_refresh_quotes()
+                >
+                    {move || if quote_loading.get() { "Refreshing…" } else { "↻ Refresh quotes" }}
+                </button>
             </div>
 
             <div class="grid grid-cols-[auto_1fr_1fr_1fr] gap-x-4 gap-y-2 items-center">
