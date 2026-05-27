@@ -157,6 +157,7 @@ pub fn ScenariosPage() -> impl IntoView {
         let user_id = auth.user_id.get();
         if let (Some(tok), Some(uid)) = (token, user_id) {
             let tok2 = tok.clone(); let uid2 = uid.clone();
+            fetch_err.set(None);
             spawn_local(async move {
                 match supabase::fetch_scenarios(&tok, &uid).await {
                     Ok(s)  => scenarios.set(s),
