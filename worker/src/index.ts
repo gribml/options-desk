@@ -181,6 +181,89 @@ async function handleClosePrices(url: URL, env: Env): Promise<Response> {
   return jsonResp(results.map(r => r.close));
 }
 
+// ── Forward volatility ────────────────────────────────────────────────────────
+
+function yearsUntil(today: Date, target: Date): number {
+  return (target.getTime() - today.getTime()) / (365.25 * 24 * 3600 * 1000);
+}
+
+// Linear interpolation of total variance V(T) = atm_vol² × T.
+// Extrapolates flat vol outside the observed range.
+function interpVariance(curve: Array<{ T: number; V: number }>, T: number): number {
+  if (curve.length === 0 || T <= 0) return 0;
+  if (T <= curve[0].T) return curve[0].V * (T / curve[0].T);
+  const last = curve[curve.length - 1];
+  if (T >= last.T) return last.V + (last.V / last.T) * (T - last.T);
+  for (let i = 0; i < curve.length - 1; i++) {
+    const lo = curve[i], hi = curve[i + 1];
+    if (T >= lo.T && T <= hi.T) {
+      const w = (T - lo.T) / (hi.T - lo.T);
+      return lo.V + w * (hi.V - lo.V);
+    }
+  }
+  return last.V;
+}
+
+// GET /forward-vol?symbol=AAPL&eval_date=2025-06-15&expiry=2025-09-19
+// Returns the forward volatility from eval_date to expiry derived from the
+// SABR ATM variance curve.  Variance is additive:
+//   σ_fwd² × (T2−T1) = σ_atm(T2)² × T2 − σ_atm(T1)² × T1
+async function handleForwardVol(url: URL, env: Env): Promise<Response> {
+  const symbol      = url.searchParams.get('symbol')?.toUpperCase();
+  const evalDateStr = url.searchParams.get('eval_date');
+  const expiryStr   = url.searchParams.get('expiry');
+
+  if (!symbol || !evalDateStr || !expiryStr) {
+    return jsonResp({ error: 'symbol, eval_date, and expiry are required' }, 400);
+  }
+
+  const today    = new Date(); today.setUTCHours(0, 0, 0, 0);
+  const evalDate = new Date(evalDateStr + 'T00:00:00Z');
+  const expiry   = new Date(expiryStr   + 'T00:00:00Z');
+
+  if (evalDate >= expiry) return jsonResp({ error: 'eval_date must be before expiry' }, 400);
+
+  const T1 = yearsUntil(today, evalDate);
+  const T2 = yearsUntil(today, expiry);
+
+  if (T1 <= 0) return jsonResp({ error: 'eval_date must be in the future' }, 400);
+  if (T2 <= 0) return jsonResp({ error: 'expiry must be in the future' }, 400);
+
+  const { results } = await env.DB.prepare(`
+    SELECT expiry, atm_vol
+    FROM vol_surface
+    WHERE underlying = ?
+      AND snapshot_date = (SELECT MAX(snapshot_date) FROM vol_surface WHERE underlying = ?)
+    ORDER BY expiry
+  `).bind(symbol, symbol).all<{ expiry: string; atm_vol: number }>();
+
+  if (!results.length) {
+    return jsonResp({ error: `No vol surface data for ${symbol}` }, 404);
+  }
+
+  const curve = results
+    .map(r => {
+      const T = yearsUntil(today, new Date(r.expiry + 'T00:00:00Z'));
+      return { T, V: r.atm_vol * r.atm_vol * T };
+    })
+    .filter(p => p.T > 0);
+
+  if (!curve.length) return jsonResp({ error: 'All vol surface expiries have passed' }, 400);
+
+  const V1 = interpVariance(curve, T1);
+  const V2 = interpVariance(curve, T2);
+
+  if (V2 <= V1) {
+    return jsonResp({ error: 'Non-positive forward variance — surface may be stale' }, 400);
+  }
+
+  const forward_vol = Math.sqrt((V2 - V1) / (T2 - T1));
+  const atm_vol_t1  = T1 > 0 ? Math.sqrt(V1 / T1) : 0;
+  const atm_vol_t2  = Math.sqrt(V2 / T2);
+
+  return jsonResp({ forward_vol, atm_vol_t1, atm_vol_t2, t1_years: T1, t2_years: T2 });
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 export default {
@@ -212,6 +295,10 @@ export default {
 
       if (url.pathname === '/close-prices' && request.method === 'GET') {
         return await handleClosePrices(url, env);
+      }
+
+      if (url.pathname === '/forward-vol' && request.method === 'GET') {
+        return await handleForwardVol(url, env);
       }
 
       return jsonResp({ error: 'Not found' }, 404);

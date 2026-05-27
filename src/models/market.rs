@@ -22,6 +22,15 @@ pub struct OptionMetaEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ForwardVolResult {
+    pub forward_vol: f64,
+    pub atm_vol_t1: f64,
+    pub atm_vol_t2: f64,
+    pub t1_years: f64,
+    pub t2_years: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct OptionChainEntry {
     pub symbol: String,
     pub underlying: String,

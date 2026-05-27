@@ -612,6 +612,9 @@ fn TradeEntryRow(
     let positions = Rc::new(positions);
     let pos_for_select = Rc::clone(&positions);
 
+    // Forward vol from eval_date to this option's expiry (None until surface is fetched).
+    let fwd_vol = RwSignal::new(Option::<f64>::None);
+
     // Fetch option chain metadata when symbol + is_option are set; cache in MarketStore.
     let store = use_context::<MarketStore>().expect("MarketStore missing");
     let option_meta = RwSignal::new(Vec::<OptionMetaEntry>::new());
@@ -635,6 +638,23 @@ fn TradeEntryRow(
             });
         } else {
             option_meta.set(vec![]);
+        }
+    });
+
+    // Fetch forward vol whenever symbol / expiry / eval_date changes.
+    // Fails silently if the vol surface table has no data yet.
+    Effect::new(move |_| {
+        let sym = entry.symbol.get().trim().to_uppercase();
+        let expiry_str = entry.expiry.get();
+        let eval_str = eval_date.get();
+        fwd_vol.set(None);
+        if entry.is_option.get() && !sym.is_empty() && !expiry_str.is_empty() && !eval_str.is_empty() {
+            let tok = auth.token.get().unwrap_or_default();
+            spawn_local(async move {
+                if let Ok(fv) = market::fetch_forward_vol(&tok, &sym, &eval_str, &expiry_str).await {
+                    fwd_vol.set(Some(fv.forward_vol));
+                }
+            });
         }
     });
 
@@ -696,12 +716,16 @@ fn TradeEntryRow(
         if expiry_str.trim().is_empty() { return; }
         let opt_type = entry_for_compute.opt_type.get();
 
-        // Always price via B-S at eval_date using the scenario's market inputs.
+        // Price via B-S at eval_date. Use forward vol (eval_date→expiry) from the
+        // SABR surface when available; otherwise fall back to the scenario's ATM vol.
         let mi = market_entries.get().into_iter()
             .find(|m| m.symbol.get().trim().to_uppercase() == sym)
             .and_then(|m| m.as_mi());
         let ed = NaiveDate::parse_from_str(eval_date.get().trim(), "%Y-%m-%d").ok();
-        if let (Some(mi), Some(ed)) = (mi, ed) {
+        if let (Some(mut mi), Some(ed)) = (mi, ed) {
+            if let Some(fv) = fwd_vol.get_untracked() {
+                mi.vol = fv;
+            }
             if let Ok(exp) = NaiveDate::parse_from_str(expiry_str.trim(), "%Y-%m-%d") {
                 let spec = OptionSpec { symbol: sym, option_type: opt_type, strike, expiry: exp };
                 if let Some(p) = bs_price(&spec, &mi, ed) {
@@ -807,6 +831,15 @@ fn TradeEntryRow(
                             }.into_any()
                         }
                     }}
+                    // Forward vol badge — appears once the SABR surface has data.
+                    {move || fwd_vol.get().map(|v| view! {
+                        <span
+                            class="text-xs font-mono text-indigo-300 px-1.5 py-0.5 bg-indigo-900/30 border border-indigo-800/50 rounded"
+                            title="Forward vol from eval date to expiry (SABR variance surface)"
+                        >
+                            {format!("fwd {:.1}%", v * 100.0)}
+                        </span>
+                    })}
                 </div>
             })}
 

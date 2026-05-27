@@ -41,3 +41,20 @@ CREATE INDEX IF NOT EXISTS idx_chain_underlying_snapshot
 
 CREATE INDEX IF NOT EXISTS idx_chain_underlying_expiry
     ON option_chain (underlying, expiration, option_type, strike);
+
+-- SABR surface written by the Dagster calibration pipeline.
+CREATE TABLE IF NOT EXISTS vol_surface (
+    underlying    TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,  -- YYYY-MM-DD
+    expiry        TEXT NOT NULL,  -- YYYY-MM-DD
+    alpha         REAL NOT NULL,
+    beta          REAL NOT NULL,  -- fixed at 1.0 (log-normal SABR)
+    rho           REAL NOT NULL,
+    nu            REAL NOT NULL,
+    atm_vol       REAL NOT NULL,  -- pre-computed ATM vol; used for variance-curve interpolation
+    forward       REAL NOT NULL,  -- forward price at calibration time
+    PRIMARY KEY (underlying, snapshot_date, expiry)
+);
+
+CREATE INDEX IF NOT EXISTS idx_surface_underlying_snapshot
+    ON vol_surface (underlying, snapshot_date DESC);
