@@ -21,6 +21,11 @@ jobs:
         working-directory: worker
         run: npm ci
 
+      - name: Inject D1 config
+        run: |
+          sed -i "s/PLACEHOLDER_D1_DATABASE_NAME/${{ secrets.D1_DATABASE_NAME }}/" worker/wrangler.toml
+          sed -i "s/PLACEHOLDER_D1_DATABASE_ID/${{ secrets.D1_DATABASE_ID }}/" worker/wrangler.toml
+
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:

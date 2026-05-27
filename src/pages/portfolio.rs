@@ -9,6 +9,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
 use crate::app::AuthState;
+use crate::format::{fmt_cash, fmt_currency};
 use crate::models::{
     option::{OptionSpec, OptionType},
     position::{Position, PositionKind},
@@ -522,7 +523,6 @@ fn MarketInputsPanel(
 #[component]
 fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
     let pnl_class = if summary.total_pnl >= 0.0 { "text-green-400" } else { "text-red-400" };
-    let val_sign = if summary.total_pnl >= 0.0 { "+" } else { "" };
 
     view! {
         <div class="bg-panel border border-blue-900 rounded-xl p-6 space-y-4">
@@ -530,13 +530,13 @@ fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
                 <div>
                     <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">"Portfolio Value"</p>
                     <p class="text-3xl font-semibold">
-                        {format!("${:.2}", summary.total_value)}
+                        {fmt_currency(summary.total_value)}
                     </p>
                 </div>
                 <div class="text-right">
                     <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">"Unrealised P&L"</p>
                     <p class=format!("text-2xl font-semibold {}", pnl_class)>
-                        {format!("{}{:.2}", val_sign, summary.total_pnl)}
+                        {fmt_cash(summary.total_pnl)}
                     </p>
                 </div>
             </div>
@@ -555,7 +555,7 @@ fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
 #[component]
 fn GreekStat(label: &'static str, value: f64, fmt: &'static str) -> impl IntoView {
     let display = if fmt.starts_with('$') {
-        format!("{}{:.2}", if value >= 0.0 { "+$" } else { "-$" }, value.abs())
+        fmt_cash(value)
     } else if fmt.contains(".4") {
         format!("{:+.4}", value)
     } else {
@@ -592,11 +592,10 @@ fn PositionRow(
     let (mark_str, value_str, pnl_str, pnl_class) = match &metrics {
         Some(m) => {
             let pc = if m.pnl >= 0.0 { "text-green-400" } else { "text-red-400" };
-            let sign = if m.pnl >= 0.0 { "+" } else { "" };
             (
                 format!("${:.2}", m.mark_price),
-                format!("${:.2}", m.mark_value),
-                format!("{}{:.2}", sign, m.pnl),
+                fmt_currency(m.mark_value),
+                fmt_cash(m.pnl),
                 pc,
             )
         }

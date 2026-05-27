@@ -2,7 +2,7 @@ use gloo_net::http::Request;
 use serde::Deserialize;
 
 use crate::config::{SUPABASE_ANON_KEY, SUPABASE_URL, WORKER_URL};
-use crate::models::market::{OptionQuote, Quote};
+use crate::models::market::{OptionChainEntry, OptionQuote, Quote};
 
 // ── Live quotes (via Cloudflare Worker → Polygon) ────────────────────────────
 
@@ -68,7 +68,28 @@ pub async fn fetch_option_quote(
     }
 }
 
-// ── Historical data sync (via Cloudflare Worker → Polygon → Supabase) ────────
+// ── Option chain ──────────────────────────────────────────────────────────────
+
+pub async fn fetch_option_chain(
+    token: &str,
+    symbol: &str,
+) -> Result<Vec<OptionChainEntry>, String> {
+    let url = format!("{}/option-chain?symbol={}", worker_base(), symbol);
+    let resp = Request::get(&url)
+        .header("Authorization", &format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.ok() {
+        resp.json::<Vec<OptionChainEntry>>().await.map_err(|e| e.to_string())
+    } else {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Err(body["error"].as_str().unwrap_or("Option chain fetch failed").to_string())
+    }
+}
+
+// ── Historical data sync (via Cloudflare Worker → Alpaca → Supabase) ────────
 
 /// Triggers the worker to fetch 2 years of daily bars for each symbol and
 /// store them in the Supabase price_history table.

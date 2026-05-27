@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod api;
 mod components;
+pub mod format;
 mod models;
 mod pages;
 mod pricing;

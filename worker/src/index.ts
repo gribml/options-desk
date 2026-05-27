@@ -21,6 +21,25 @@ interface DailyBar {
   volume: number;
 }
 
+interface OptionChainEntry {
+  symbol: string;       // OCC symbol e.g. AAPL250117C00150000
+  underlying: string;
+  expiry: string;       // YYYY-MM-DD
+  type: 'call' | 'put';
+  strike: number;
+  bid: number;
+  ask: number;
+  mid: number;
+  last: number | null;
+  implied_vol: number | null;
+  delta: number | null;
+  gamma: number | null;
+  theta: number | null;
+  vega: number | null;
+  open_interest: number | null;
+  volume: number | null;
+}
+
 // ── Provider interface ────────────────────────────────────────────────────────
 //
 // To add a new provider, implement this interface and swap the constructor
@@ -35,36 +54,43 @@ interface MarketDataProvider {
     strike: number,
   ): Promise<OptionQuote>;
   fetchDailyBars(symbol: string, fromDate: string, toDate: string): Promise<DailyBar[]>;
+  fetchOptionChain(symbol: string): Promise<OptionChainEntry[]>;
 }
 
-// ── Polygon.io implementation ─────────────────────────────────────────────────
+// ── Alpaca implementation ─────────────────────────────────────────────────────
 
-class PolygonProvider implements MarketDataProvider {
-  private readonly base = 'https://api.polygon.io';
+class AlpacaProvider implements MarketDataProvider {
+  private readonly base = 'https://data.alpaca.markets';
 
-  constructor(private readonly apiKey: string) {}
+  constructor(
+    private readonly apiKey: string,
+    private readonly apiSecret: string,
+  ) {}
+
+  private headers(): Record<string, string> {
+    return {
+      'APCA-API-KEY-ID': this.apiKey,
+      'APCA-API-SECRET-KEY': this.apiSecret,
+    };
+  }
 
   async fetchQuote(symbol: string): Promise<Quote> {
-    const url =
-      `${this.base}/v2/snapshot/locale/us/markets/stocks/tickers/${symbol}` +
-      `?apiKey=${this.apiKey}`;
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`Polygon snapshot ${resp.status}`);
+    const url = `${this.base}/v2/stocks/${symbol.toUpperCase()}/snapshot?feed=iex`;
+    const resp = await fetch(url, { headers: this.headers() });
+    if (!resp.ok) throw new Error(`Alpaca snapshot ${resp.status}`);
 
     const data = (await resp.json()) as Record<string, unknown>;
-    const t = data['ticker'] as Record<string, unknown> | undefined;
-    if (!t) throw new Error(`No ticker data for ${symbol}`);
+    const latestTrade = data['latestTrade'] as Record<string, number> | undefined;
+    const latestQuote = data['latestQuote'] as Record<string, number> | undefined;
+    const dailyBar = data['dailyBar'] as Record<string, number> | undefined;
+    const prevDailyBar = data['prevDailyBar'] as Record<string, number> | undefined;
 
-    const lastTrade = t['lastTrade'] as Record<string, number> | undefined;
-    const day = t['day'] as Record<string, number> | undefined;
-    const prevDay = t['prevDay'] as Record<string, number> | undefined;
-
-    const price = lastTrade?.['p'] ?? day?.['c'] ?? prevDay?.['c'] ?? 0;
-    const prevClose = prevDay?.['c'] ?? price;
+    const price = latestTrade?.['p'] ?? latestQuote?.['ap'] ?? dailyBar?.['c'] ?? 0;
+    const prevClose = prevDailyBar?.['c'] ?? price;
     const change = price - prevClose;
     const change_pct = prevClose !== 0 ? (change / prevClose) * 100 : 0;
 
-    return { symbol: (t['ticker'] as string) ?? symbol, price, change, change_pct };
+    return { symbol: symbol.toUpperCase(), price, change, change_pct };
   }
 
   async fetchOptionQuote(
@@ -75,68 +101,131 @@ class PolygonProvider implements MarketDataProvider {
   ): Promise<OptionQuote> {
     const ticker = buildOptionTicker(symbol, expiry, type, strike);
     const url =
-      `${this.base}/v3/snapshot/options/${symbol.toUpperCase()}/${ticker}` +
-      `?apiKey=${this.apiKey}`;
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`Polygon option snapshot ${resp.status}`);
+      `${this.base}/v1beta1/options/snapshots/${symbol.toUpperCase()}` +
+      `?symbols=${ticker}&feed=indicative`;
+    const resp = await fetch(url, { headers: this.headers() });
+    if (!resp.ok) throw new Error(`Alpaca option snapshot ${resp.status}`);
 
     const data = (await resp.json()) as Record<string, unknown>;
-    const results = data['results'] as Record<string, unknown> | undefined;
-    if (!results) throw new Error(`No option data for ${ticker}`);
+    const snapshots = data['snapshots'] as Record<string, unknown> | undefined;
+    const snap = snapshots?.[ticker] as Record<string, unknown> | undefined;
+    if (!snap) throw new Error(`No option data for ${ticker}`);
 
-    const lastQuote = results['last_quote'] as Record<string, number> | undefined;
-    const lastTrade = results['last_trade'] as Record<string, number> | undefined;
-    const day = results['day'] as Record<string, number> | undefined;
+    const latestQuote = snap['latestQuote'] as Record<string, number> | undefined;
+    const latestTrade = snap['latestTrade'] as Record<string, number> | undefined;
+    const dailyBar = snap['dailyBar'] as Record<string, number> | undefined;
 
     let price = 0;
-    if (lastQuote?.['bid'] != null && lastQuote?.['ask'] != null) {
-      price = (lastQuote['bid'] + lastQuote['ask']) / 2;
-    } else if (lastTrade?.['price'] != null) {
-      price = lastTrade['price'];
-    } else if (day?.['c'] != null) {
-      price = day['c'];
+    if (latestQuote?.['bp'] != null && latestQuote?.['ap'] != null) {
+      price = (latestQuote['bp'] + latestQuote['ap']) / 2;
+    } else if (latestTrade?.['p'] != null) {
+      price = latestTrade['p'];
+    } else if (dailyBar?.['c'] != null) {
+      price = dailyBar['c'];
     }
 
-    const implied_vol = (results['implied_volatility'] as number | undefined) ?? null;
-
+    const implied_vol = (snap['impliedVolatility'] as number | undefined) ?? null;
     return { price, implied_vol };
   }
 
   async fetchDailyBars(symbol: string, fromDate: string, toDate: string): Promise<DailyBar[]> {
     const all: DailyBar[] = [];
-    // limit=50000 is well above 2yr (~504 bars); handle pagination via next_url.
     let url: string | null =
-      `${this.base}/v2/aggs/ticker/${symbol}/range/1/day/${fromDate}/${toDate}` +
-      `?adjusted=true&sort=asc&limit=50000&apiKey=${this.apiKey}`;
+      `${this.base}/v2/stocks/${symbol.toUpperCase()}/bars` +
+      `?timeframe=1Day&start=${fromDate}&end=${toDate}&limit=10000&feed=iex&sort=asc`;
 
     while (url) {
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`Polygon aggs ${resp.status}`);
+      const resp = await fetch(url, { headers: this.headers() });
+      if (!resp.ok) throw new Error(`Alpaca bars ${resp.status}`);
       const data = (await resp.json()) as Record<string, unknown>;
 
-      const results = data['results'];
-      if (Array.isArray(results)) {
-        for (const r of results as Record<string, number>[]) {
+      const bars = data['bars'];
+      if (Array.isArray(bars)) {
+        for (const b of bars as Record<string, unknown>[]) {
           all.push({
-            date: new Date(r['t']).toISOString().slice(0, 10),
-            open: r['o'],
-            high: r['h'],
-            low: r['l'],
-            close: r['c'],
-            volume: r['v'],
+            date: (b['t'] as string).slice(0, 10),
+            open: b['o'] as number,
+            high: b['h'] as number,
+            low: b['l'] as number,
+            close: b['c'] as number,
+            volume: b['v'] as number,
           });
         }
       }
 
-      const nextUrl = data['next_url'];
-      url = typeof nextUrl === 'string' ? `${nextUrl}&apiKey=${this.apiKey}` : null;
+      const nextToken = data['next_page_token'];
+      if (typeof nextToken === 'string' && nextToken) {
+        const next = new URL(url);
+        next.searchParams.set('page_token', nextToken);
+        url = next.toString();
+      } else {
+        url = null;
+      }
+    }
+
+    return all;
+  }
+
+  async fetchOptionChain(symbol: string): Promise<OptionChainEntry[]> {
+    const all: OptionChainEntry[] = [];
+    let url: string | null =
+      `${this.base}/v1beta1/options/snapshots/${symbol.toUpperCase()}` +
+      `?feed=indicative&limit=1000`;
+
+    while (url) {
+      const resp = await fetch(url, { headers: this.headers() });
+      if (!resp.ok) throw new Error(`Alpaca option chain ${resp.status}`);
+      const data = (await resp.json()) as Record<string, unknown>;
+
+      const snapshots = data['snapshots'] as Record<string, unknown> | undefined;
+      if (snapshots) {
+        for (const [occSymbol, snap] of Object.entries(snapshots)) {
+          const s = snap as Record<string, unknown>;
+          const details = s['details'] as Record<string, unknown> | undefined;
+          const latestQuote = s['latestQuote'] as Record<string, number> | undefined;
+          const latestTrade = s['latestTrade'] as Record<string, number> | undefined;
+          const greeks = s['greeks'] as Record<string, number> | undefined;
+          const dailyBar = s['dailyBar'] as Record<string, number> | undefined;
+
+          const bid = latestQuote?.['bp'] ?? 0;
+          const ask = latestQuote?.['ap'] ?? 0;
+
+          all.push({
+            symbol: occSymbol,
+            underlying: symbol.toUpperCase(),
+            expiry: (details?.['expirationDate'] as string) ?? '',
+            type: (details?.['contractType'] as string) === 'put' ? 'put' : 'call',
+            strike: parseFloat((details?.['strikePrice'] as string) ?? '0'),
+            bid,
+            ask,
+            mid: (bid + ask) / 2,
+            last: latestTrade?.['p'] ?? null,
+            implied_vol: (s['impliedVolatility'] as number | undefined) ?? null,
+            delta: greeks?.['delta'] ?? null,
+            gamma: greeks?.['gamma'] ?? null,
+            theta: greeks?.['theta'] ?? null,
+            vega: greeks?.['vega'] ?? null,
+            open_interest: (s['openInterest'] as number | undefined) ?? null,
+            volume: dailyBar?.['v'] ?? null,
+          });
+        }
+      }
+
+      const nextToken = data['next_page_token'];
+      if (typeof nextToken === 'string' && nextToken) {
+        const next = new URL(url);
+        next.searchParams.set('page_token', nextToken);
+        url = next.toString();
+      } else {
+        url = null;
+      }
     }
 
     return all;
   }
 }
 
-// Polygon option ticker format: O:{SYMBOL}{YYMMDD}{C|P}{strike×1000 padded to 8 digits}
+// OCC option ticker: O:{SYMBOL}{YYMMDD}{C|P}{strike×1000 padded to 8 digits}
 // Example: AAPL $150 call exp 2025-01-17 → O:AAPL250117C00150000
 function buildOptionTicker(symbol: string, expiry: string, type: 'call' | 'put', strike: number): string {
   const [year, month, day] = expiry.split('-');
@@ -149,10 +238,12 @@ function buildOptionTicker(symbol: string, expiry: string, type: 'call' | 'put',
 // ── Worker env ────────────────────────────────────────────────────────────────
 
 interface Env {
-  POLYGON_KEY: string;
+  ALPACA_KEY: string;
+  ALPACA_SECRET: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
   SUPABASE_ANON_KEY: string;
+  DB: D1Database;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -216,14 +307,12 @@ async function cachedJson(
   });
 }
 
-// ── Route: GET /quote?symbol=AAPL ─────────────────────────────────────────────
+// ── Route handlers ────────────────────────────────────────────────────────────
 
 async function handleQuote(symbol: string, env: Env): Promise<Response> {
-  const provider = new PolygonProvider(env.POLYGON_KEY);
+  const provider = new AlpacaProvider(env.ALPACA_KEY, env.ALPACA_SECRET);
   return cachedJson(`quote/${symbol}`, 300, () => provider.fetchQuote(symbol));
 }
-
-// ── Route: GET /option-quote?symbol=AAPL&expiry=2025-01-17&type=call&strike=150
 
 async function handleOptionQuote(url: URL, env: Env): Promise<Response> {
   const symbol = url.searchParams.get('symbol')?.toUpperCase();
@@ -241,15 +330,23 @@ async function handleOptionQuote(url: URL, env: Env): Promise<Response> {
   if (isNaN(strike)) return jsonResp({ error: 'strike must be a number' }, 400);
 
   const cacheKey = `option-quote/${buildOptionTicker(symbol, expiry, type, strike)}`;
-  const provider = new PolygonProvider(env.POLYGON_KEY);
+  const provider = new AlpacaProvider(env.ALPACA_KEY, env.ALPACA_SECRET);
   return cachedJson(cacheKey, 300, () =>
     provider.fetchOptionQuote(symbol, expiry, type, strike),
   );
 }
 
-// ── Route: POST /history ──────────────────────────────────────────────────────
-// Body: { symbols: string[] }
-// Fetches 2 years of daily bars per symbol and upserts into price_history.
+// GET /option-chain?symbol=AAPL
+// Returns the full option chain snapshot. Cached 5 min.
+async function handleOptionChain(url: URL, env: Env): Promise<Response> {
+  const symbol = url.searchParams.get('symbol')?.toUpperCase();
+  if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
+
+  const provider = new AlpacaProvider(env.ALPACA_KEY, env.ALPACA_SECRET);
+  return cachedJson(`option-chain/${symbol}`, 300, () =>
+    provider.fetchOptionChain(symbol),
+  );
+}
 
 async function handleHistory(request: Request, env: Env): Promise<Response> {
   const body = (await request.json()) as { symbols?: unknown };
@@ -263,7 +360,7 @@ async function handleHistory(request: Request, env: Env): Promise<Response> {
     .toISOString()
     .slice(0, 10);
 
-  const provider = new PolygonProvider(env.POLYGON_KEY);
+  const provider = new AlpacaProvider(env.ALPACA_KEY, env.ALPACA_SECRET);
   const results: Record<string, string> = {};
 
   for (const symbol of symbols) {
@@ -313,6 +410,10 @@ export default {
 
     if (url.pathname === '/option-quote' && request.method === 'GET') {
       return handleOptionQuote(url, env);
+    }
+
+    if (url.pathname === '/option-chain' && request.method === 'GET') {
+      return handleOptionChain(url, env);
     }
 
     if (url.pathname === '/history' && request.method === 'POST') {

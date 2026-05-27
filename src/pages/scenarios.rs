@@ -87,6 +87,8 @@ fn evaluate(scenario: &Scenario, positions: &[Position]) -> ScenarioResult {
         }
     }
 
+    net_cash -= st_gain.max(0.0) * 0.37 + lt_gain.max(0.0) * 0.20;
+
     ScenarioResult { evaluated_at: Utc::now(), trade_results, assignments, net_cash,
         total_st_gain: st_gain, total_lt_gain: lt_gain, greeks }
 }
@@ -773,7 +775,7 @@ fn ScenarioCard(
     let st_rate = 0.37_f64;
     let lt_rate = 0.20_f64;
     let tax = result.tax_estimate(st_rate, lt_rate);
-    let after_tax_cash = result.net_cash - tax;
+    let after_tax_cash = result.net_cash;
 
     let cash_class = if result.net_cash >= 0.0 { "text-green-400" } else { "text-red-400" };
     let at_class   = if after_tax_cash >= 0.0  { "text-green-300" } else { "text-red-300" };
@@ -931,9 +933,7 @@ fn ScenarioCard(
     }
 }
 
-fn fmt_cash(v: f64) -> String {
-    format!("{}{:.2}", if v >= 0.0 { "+$" } else { "-$" }, v.abs())
-}
+use crate::format::fmt_cash;
 
 // ── Shared form components ────────────────────────────────────────────────────
 
