@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use uuid::Uuid;
 use chrono::NaiveDate;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -66,9 +65,7 @@ struct PositionMetrics {
     rho: f64,
 }
 
-/// `option_price` — actual mid from the option chain; overrides B-S theoretical
-/// for the mark. Greeks always use B-S so they remain reactive to input changes.
-fn compute_metrics(pos: &Position, md: &MarketData, option_price: Option<f64>) -> Option<PositionMetrics> {
+fn compute_metrics(pos: &Position, md: &MarketData) -> Option<PositionMetrics> {
     let price = md.parsed_price()?;
     let qty = pos.quantity as f64;
 
@@ -110,7 +107,7 @@ fn compute_metrics(pos: &Position, md: &MarketData, option_price: Option<f64>) -
             let g = BsInputs { spot: price, strike: spec.strike, expiry_years: t, vol, rate }
                 .greeks(spec.option_type);
 
-            let mark_price = option_price.unwrap_or(g.price);
+            let mark_price = g.price;
             Some(PositionMetrics {
                 mark_price,
                 mark_value: mark_price * mult,
@@ -167,8 +164,6 @@ pub fn PortfolioPage() -> impl IntoView {
     let show_add = RwSignal::new(false);
     let market_data = RwSignal::new(HashMap::<String, MarketData>::new());
     let quote_loading = RwSignal::new(false);
-    // Actual mid prices for option positions from the option chain, keyed by position ID.
-    let option_prices = RwSignal::new(HashMap::<Uuid, f64>::new());
 
     // Apply quotes to market_data (shared by both initial load and refresh).
     let apply_quotes = move |quotes: Vec<crate::models::market::Quote>| {
@@ -195,11 +190,10 @@ pub fn PortfolioPage() -> impl IntoView {
                             .collect::<HashSet<_>>()
                             .into_iter()
                             .collect();
-                        let option_infos: Vec<(Uuid, String, String, &'static str, f64)> = ps.iter()
+                        let option_infos: Vec<(String, String, &'static str, f64)> = ps.iter()
                             .filter_map(|p| {
                                 let spec = p.option_spec.as_ref()?;
                                 Some((
-                                    p.id,
                                     p.symbol.clone(),
                                     spec.expiry.format("%Y-%m-%d").to_string(),
                                     match spec.option_type {
@@ -236,14 +230,12 @@ pub fn PortfolioPage() -> impl IntoView {
                             }
                         }
 
-                        // Fetch each option contract: store market mid as mark price,
-                        // update vol with market IV so B-S Greeks are properly calibrated.
-                        for (pos_id, sym, expiry, opt_type, strike) in option_infos {
+                        // Fetch each option contract's IV to seed market_data.vol for B-S Greeks.
+                        for (sym, expiry, opt_type, strike) in option_infos {
                             let tok2 = tok.clone();
                             let sym2 = sym.clone();
                             spawn_local(async move {
                                 if let Ok(oq) = market::fetch_option_quote(&tok2, &sym2, &expiry, opt_type, strike).await {
-                                    option_prices.update(|map| { map.insert(pos_id, oq.price); });
                                     if let Some(iv) = oq.implied_vol {
                                         market_data.update(|map| {
                                             if let Some(md) = map.get_mut(&sym2) {
@@ -277,10 +269,9 @@ pub fn PortfolioPage() -> impl IntoView {
     let metrics = Memo::new(move |_| {
         let ps = positions.get();
         let md = market_data.get();
-        let op = option_prices.get();
         let empty = MarketData::default();
         ps.iter()
-            .map(|p| compute_metrics(p, md.get(&p.symbol).unwrap_or(&empty), op.get(&p.id).copied()))
+            .map(|p| compute_metrics(p, md.get(&p.symbol).unwrap_or(&empty)))
             .collect::<Vec<_>>()
     });
 
@@ -317,11 +308,9 @@ pub fn PortfolioPage() -> impl IntoView {
                     OptionType::Call => "call",
                     OptionType::Put  => "put",
                 };
-                let pos_id = p.id;
                 let strike = spec.strike;
                 spawn_local(async move {
                     if let Ok(oq) = market::fetch_option_quote(&tok2, &sym, &expiry, opt_type, strike).await {
-                        option_prices.update(|map| { map.insert(pos_id, oq.price); });
                         if let Some(iv) = oq.implied_vol {
                             market_data.update(|map| {
                                 if let Some(md) = map.get_mut(&sym) {
