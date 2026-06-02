@@ -448,6 +448,37 @@ fn ScenarioForm(
     let err    = RwSignal::new(Option::<String>::None);
     let saving = RwSignal::new(false);
 
+    // Set to true on first user edit of market inputs; gates the auto-recompute
+    // effect so it doesn't overwrite saved trade prices on initial form load.
+    let market_touched = RwSignal::new(false);
+
+    Effect::new(move |_| {
+        if !market_touched.get() { return; }
+        let inputs: Vec<ScenarioMarketInput> = market_entries.get()
+            .iter()
+            .filter_map(|me| me.as_mi())
+            .collect();
+        let ed = NaiveDate::parse_from_str(eval_date.get().trim(), "%Y-%m-%d").ok();
+        for te in trade_entries.get() {
+            let sym = te.symbol.get().trim().to_uppercase();
+            let mi = match inputs.iter().find(|m| m.symbol == sym) {
+                Some(m) => m.clone(),
+                None => continue,
+            };
+            if te.is_option.get() {
+                let strike = match te.strike.get().trim().parse::<f64>() { Ok(v) => v, Err(_) => continue };
+                let exp = match NaiveDate::parse_from_str(te.expiry.get().trim(), "%Y-%m-%d") { Ok(v) => v, Err(_) => continue };
+                let ed = match ed { Some(d) => d, None => continue };
+                let spec = OptionSpec { symbol: sym, option_type: te.opt_type.get(), strike, expiry: exp };
+                if let Some(p) = bs_price(&spec, &mi, ed) {
+                    te.price.set(format!("{:.4}", p));
+                }
+            } else {
+                te.price.set(format!("{:.2}", mi.price));
+            }
+        }
+    });
+
     let positions = Arc::new(positions);
 
     let existing_for_submit = existing.clone();
@@ -525,6 +556,11 @@ fn ScenarioForm(
                 </div>
                 {move || market_entries.get().into_iter().enumerate().map(|(i, me)| {
                     let me_fill = me.clone();
+                    // Extract signals as named Copy bindings so each closure below
+                    // captures an unambiguous RwSignal<String> rather than a field
+                    // path through a non-Copy struct.
+                    let (sym_sig, price_sig, vol_sig, rate_sig) =
+                        (me.symbol, me.price, me.vol, me.rate);
                     let fill = move |_: web_sys::MouseEvent| {
                         let sym = me_fill.symbol.get().trim().to_uppercase();
                         if sym.is_empty() { return; }
@@ -542,14 +578,63 @@ fn ScenarioForm(
                                     me2.vol.set(format!("{:.1}", vol * 100.0));
                                 }
                             }
+                            market_touched.set(true);
                         });
                     };
                     view! {
                         <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto_auto] gap-2 items-center">
-                            <MicroInput signal=me.symbol ph="AAPL" />
-                            <MicroInput signal=me.price ph="155.00" />
-                            <MicroInput signal=me.vol ph="25" />
-                            <MicroInput signal=me.rate ph="3.75" />
+                            <MicroInput signal=sym_sig ph="AAPL" />
+                            <input
+                                class="w-full bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                                prop:value=move || price_sig.get()
+                                on:input=move |ev| { price_sig.set(event_target_value(&ev)); market_touched.set(true); }
+                                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                    let key = ev.key();
+                                    if key == "ArrowUp" || key == "ArrowDown" {
+                                        ev.prevent_default();
+                                        let dir = if key == "ArrowUp" { 1.0_f64 } else { -1.0_f64 };
+                                        if let Ok(p) = price_sig.get().trim().parse::<f64>() {
+                                            price_sig.set(format!("{:.2}", (p * (1.0 + dir * 0.01)).max(0.0)));
+                                            market_touched.set(true);
+                                        }
+                                    }
+                                }
+                                placeholder="155.00"
+                            />
+                            <input
+                                class="w-full bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                                prop:value=move || vol_sig.get()
+                                on:input=move |ev| { vol_sig.set(event_target_value(&ev)); market_touched.set(true); }
+                                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                    let key = ev.key();
+                                    if key == "ArrowUp" || key == "ArrowDown" {
+                                        ev.prevent_default();
+                                        let dir = if key == "ArrowUp" { 1.0_f64 } else { -1.0_f64 };
+                                        if let Ok(v) = vol_sig.get().trim().parse::<f64>() {
+                                            vol_sig.set(format!("{:.2}", (v + dir).max(0.0)));
+                                            market_touched.set(true);
+                                        }
+                                    }
+                                }
+                                placeholder="25"
+                            />
+                            <input
+                                class="w-full bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                                prop:value=move || rate_sig.get()
+                                on:input=move |ev| { rate_sig.set(event_target_value(&ev)); market_touched.set(true); }
+                                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                    let key = ev.key();
+                                    if key == "ArrowUp" || key == "ArrowDown" {
+                                        ev.prevent_default();
+                                        let dir = if key == "ArrowUp" { 1.0_f64 } else { -1.0_f64 };
+                                        if let Ok(r) = rate_sig.get().trim().parse::<f64>() {
+                                            rate_sig.set(format!("{:.2}", r + dir * 0.1));
+                                            market_touched.set(true);
+                                        }
+                                    }
+                                }
+                                placeholder="3.75"
+                            />
                             <button type="button"
                                 class="text-gray-500 hover:text-blue-300 text-xs border border-border rounded px-1.5 py-1 transition-colors"
                                 on:click=fill
