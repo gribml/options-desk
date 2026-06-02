@@ -805,7 +805,7 @@ fn TradeEntryRow(
                                 <select
                                     class=MICRO_CLS
                                     style="min-width:9rem"
-                                    prop:value=move || entry.expiry.get()
+                                    prop:value=move || { let _ = expiries.get(); entry.expiry.get() }
                                     on:change=move |ev| {
                                         entry.expiry.set(event_target_value(&ev));
                                         entry.strike.set(String::new());
@@ -819,7 +819,7 @@ fn TradeEntryRow(
                                 <select
                                     class=MICRO_CLS
                                     style="min-width:6rem"
-                                    prop:value=move || entry.strike.get()
+                                    prop:value=move || { let _ = strikes.get(); entry.strike.get() }
                                     on:change=move |ev| entry.strike.set(event_target_value(&ev))
                                 >
                                     <option value="">"— strike —"</option>
