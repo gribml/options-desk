@@ -1,5 +1,2 @@
-ALPACA_KEY=your_alpaca_api_key
-ALPACA_SECRET=your_alpaca_api_secret
 SUPABASE_URL=https://xxxx.supabase.co
-SUPABASE_SERVICE_KEY=your_service_role_key
 SUPABASE_ANON_KEY=your_anon_key

@@ -32,7 +32,7 @@ impl Default for MarketData {
         Self {
             price: String::new(),
             vol: "25".to_string(),
-            rate: "5".to_string(),
+            rate: "3.75".to_string(),
             change: None,
             change_pct: None,
         }
@@ -47,7 +47,7 @@ impl MarketData {
         self.vol.parse::<f64>().ok().filter(|&v| v > 0.0).map(|v| v / 100.0)
     }
     fn parsed_rate(&self) -> f64 {
-        self.rate.parse::<f64>().unwrap_or(5.0) / 100.0
+        self.rate.parse::<f64>().unwrap_or(3.75) / 100.0
     }
 }
 
@@ -440,6 +440,7 @@ fn MarketInputsPanel(
                 {symbols.into_iter().map(|sym| {
                     let (sp, sv, sr, sc) = (sym.clone(), sym.clone(), sym.clone(), sym.clone());
                     let (wp, wv, wr) = (sym.clone(), sym.clone(), sym.clone());
+                    let (kp, kv, kr) = (sym.clone(), sym.clone(), sym.clone());
                     view! {
                         // Symbol + live change badge
                         <span class="text-sm font-semibold flex items-center gap-1.5">
@@ -464,6 +465,19 @@ fn MarketInputsPanel(
                                 let v = event_target_value(&ev);
                                 market_data.update(|map| { if let Some(m) = map.get_mut(&wp) { m.price = v; } });
                             }
+                            on:keydown=move |ev| {
+                                let key = ev.key();
+                                if key != "ArrowUp" && key != "ArrowDown" { return; }
+                                ev.prevent_default();
+                                let dir = if key == "ArrowUp" { 1.0_f64 } else { -1.0_f64 };
+                                market_data.update(|map| {
+                                    if let Some(m) = map.get_mut(&kp) {
+                                        if let Ok(p) = m.price.parse::<f64>() {
+                                            m.price = format!("{:.2}", (p * (1.0 + dir * 0.01)).max(0.0));
+                                        }
+                                    }
+                                });
+                            }
                             placeholder="155.00"
                         />
                         <input
@@ -472,6 +486,19 @@ fn MarketInputsPanel(
                             on:input=move |ev| {
                                 let v = event_target_value(&ev);
                                 market_data.update(|map| { if let Some(m) = map.get_mut(&wv) { m.vol = v; } });
+                            }
+                            on:keydown=move |ev| {
+                                let key = ev.key();
+                                if key != "ArrowUp" && key != "ArrowDown" { return; }
+                                ev.prevent_default();
+                                let dir = if key == "ArrowUp" { 1.0_f64 } else { -1.0_f64 };
+                                market_data.update(|map| {
+                                    if let Some(m) = map.get_mut(&kv) {
+                                        if let Ok(v) = m.vol.parse::<f64>() {
+                                            m.vol = format!("{:.2}", (v + dir).max(0.0));
+                                        }
+                                    }
+                                });
                             }
                             placeholder="25"
                         />
@@ -482,7 +509,20 @@ fn MarketInputsPanel(
                                 let v = event_target_value(&ev);
                                 market_data.update(|map| { if let Some(m) = map.get_mut(&wr) { m.rate = v; } });
                             }
-                            placeholder="5"
+                            on:keydown=move |ev| {
+                                let key = ev.key();
+                                if key != "ArrowUp" && key != "ArrowDown" { return; }
+                                ev.prevent_default();
+                                let dir = if key == "ArrowUp" { 1.0_f64 } else { -1.0_f64 };
+                                market_data.update(|map| {
+                                    if let Some(m) = map.get_mut(&kr) {
+                                        if let Ok(r) = m.rate.parse::<f64>() {
+                                            m.rate = format!("{:.2}", r + dir * 0.1);
+                                        }
+                                    }
+                                });
+                            }
+                            placeholder="3.75"
                         />
                     }
                 }).collect_view()}

@@ -14,7 +14,7 @@ pub fn PricerPage() -> impl IntoView {
     let spot = RwSignal::new("100".to_string());
     let strike = RwSignal::new("100".to_string());
     let vol = RwSignal::new("25".to_string()); // as percent
-    let rate = RwSignal::new("5".to_string()); // as percent
+    let rate = RwSignal::new("3.75".to_string()); // as percent
     let expiry_days = RwSignal::new("30".to_string());
     let opt_type = RwSignal::new(OptionType::Call);
     let market_price = RwSignal::new("".to_string()); // for IV calc
@@ -76,7 +76,7 @@ pub fn PricerPage() -> impl IntoView {
                 <InputField label="Spot (S)" signal=spot placeholder="100" />
                 <InputField label="Strike (K)" signal=strike placeholder="100" />
                 <InputField label="Volatility (%)" signal=vol placeholder="25" />
-                <InputField label="Risk-free rate (%)" signal=rate placeholder="5" />
+                <InputField label="Risk-free rate (%)" signal=rate placeholder="3.75" />
                 <InputField label="Days to expiry" signal=expiry_days placeholder="30" />
             </div>
 

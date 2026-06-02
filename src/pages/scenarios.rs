@@ -395,7 +395,7 @@ impl MarketEntry {
             symbol: RwSignal::new(String::new()),
             price: RwSignal::new(String::new()),
             vol: RwSignal::new("25".to_string()),
-            rate: RwSignal::new("5".to_string()),
+            rate: RwSignal::new("3.75".to_string()),
         }
     }
 
@@ -549,7 +549,7 @@ fn ScenarioForm(
                             <MicroInput signal=me.symbol ph="AAPL" />
                             <MicroInput signal=me.price ph="155.00" />
                             <MicroInput signal=me.vol ph="25" />
-                            <MicroInput signal=me.rate ph="5" />
+                            <MicroInput signal=me.rate ph="3.75" />
                             <button type="button"
                                 class="text-gray-500 hover:text-blue-300 text-xs border border-border rounded px-1.5 py-1 transition-colors"
                                 on:click=fill
