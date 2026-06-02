@@ -847,6 +847,7 @@ fn TradeEntryRow(
                 <span class="text-xs text-gray-500">"Closes:"</span>
                 <select
                     class="bg-surface border border-border rounded px-2 py-1 text-xs text-gray-300 focus:outline-none focus:border-blue-500"
+                    prop:value=move || entry.closes_id.get().map(|id| id.to_string()).unwrap_or_default()
                     on:change=on_closes_change
                 >
                     <option value="">"— none —"</option>
