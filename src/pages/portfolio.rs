@@ -23,6 +23,7 @@ struct MarketData {
     price: String,
     vol: String,
     rate: String,
+    ref_price: Option<f64>,
     change: Option<f64>,
     change_pct: Option<f64>,
 }
@@ -33,6 +34,7 @@ impl Default for MarketData {
             price: String::new(),
             vol: "25".to_string(),
             rate: "3.75".to_string(),
+            ref_price: None,
             change: None,
             change_pct: None,
         }
@@ -171,6 +173,7 @@ pub fn PortfolioPage() -> impl IntoView {
             for q in quotes {
                 let md = map.entry(q.symbol.clone()).or_default();
                 md.price = format!("{:.2}", q.price);
+                md.ref_price = Some(q.price);
                 md.change = Some(q.change);
                 md.change_pct = Some(q.change_pct);
             }
@@ -463,7 +466,15 @@ fn MarketInputsPanel(
                             prop:value=move || market_data.get().get(&sp).map(|m| m.price.clone()).unwrap_or_default()
                             on:input=move |ev| {
                                 let v = event_target_value(&ev);
-                                market_data.update(|map| { if let Some(m) = map.get_mut(&wp) { m.price = v; } });
+                                market_data.update(|map| {
+                                    if let Some(m) = map.get_mut(&wp) {
+                                        m.price = v;
+                                        if let (Ok(new_p), Some(ref_p)) = (m.price.parse::<f64>(), m.ref_price) {
+                                            m.change = Some(new_p - ref_p);
+                                            m.change_pct = Some((new_p - ref_p) / ref_p * 100.0);
+                                        }
+                                    }
+                                });
                             }
                             on:keydown=move |ev| {
                                 let key = ev.key();
@@ -473,7 +484,12 @@ fn MarketInputsPanel(
                                 market_data.update(|map| {
                                     if let Some(m) = map.get_mut(&kp) {
                                         if let Ok(p) = m.price.parse::<f64>() {
-                                            m.price = format!("{:.2}", (p * (1.0 + dir * 0.01)).max(0.0));
+                                            let new_p = (p * (1.0 + dir * 0.01)).max(0.0);
+                                            m.price = format!("{:.2}", new_p);
+                                            if let Some(ref_p) = m.ref_price {
+                                                m.change = Some(new_p - ref_p);
+                                                m.change_pct = Some((new_p - ref_p) / ref_p * 100.0);
+                                            }
                                         }
                                     }
                                 });
