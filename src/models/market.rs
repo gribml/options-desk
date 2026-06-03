@@ -31,6 +31,20 @@ pub struct ForwardVolResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LatestBar {
+    pub symbol: String,
+    pub bar_time: String,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub trade_count: i64,
+    pub vwap: f64,
+    pub cached: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct OptionChainEntry {
     pub symbol: String,
     pub underlying: String,

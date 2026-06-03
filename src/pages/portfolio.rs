@@ -8,7 +8,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::api::{market, supabase};
 use crate::app::AuthState;
 use crate::format::{fmt_cash, Num};
-use crate::models::market::OptionMetaEntry;
+use crate::models::market::{LatestBar, OptionMetaEntry};
 use crate::store::MarketStore;
 use crate::models::{
     option::{OptionSpec, OptionType},
@@ -167,15 +167,13 @@ pub fn PortfolioPage() -> impl IntoView {
     let market_data = RwSignal::new(HashMap::<String, MarketData>::new());
     let quote_loading = RwSignal::new(false);
 
-    // Apply quotes to market_data (shared by both initial load and refresh).
-    let apply_quotes = move |quotes: Vec<crate::models::market::Quote>| {
+    // Apply latest bars to market_data (shared by both initial load and refresh).
+    let apply_bars = move |bars: Vec<LatestBar>| {
         market_data.update(|map| {
-            for q in quotes {
-                let md = map.entry(q.symbol.clone()).or_default();
-                md.price = format!("{:.2}", q.price);
-                md.ref_price = Some(q.price);
-                md.change = Some(q.change);
-                md.change_pct = Some(q.change_pct);
+            for b in bars {
+                let md = map.entry(b.symbol.clone()).or_default();
+                md.price = format!("{:.2}", b.close);
+                md.ref_price = Some(b.close);
             }
         });
     };
@@ -211,11 +209,11 @@ pub fn PortfolioPage() -> impl IntoView {
                         positions.set(ps);
 
                         if !syms.is_empty() {
-                            // Apply any already-cached quotes immediately.
+                            // Apply any already-cached bars immediately.
                             let cached: Vec<_> = syms.iter()
                                 .filter_map(|s| store.quotes.get_untracked().get(s).cloned())
                                 .collect();
-                            if !cached.is_empty() { apply_quotes(cached); }
+                            if !cached.is_empty() { apply_bars(cached); }
 
                             // Fetch only the symbols not yet in the cache.
                             let missing: Vec<String> = syms.iter()
@@ -224,11 +222,11 @@ pub fn PortfolioPage() -> impl IntoView {
                                 .collect();
                             if !missing.is_empty() {
                                 quote_loading.set(true);
-                                let fetched = market::fetch_quotes(&tok, &missing).await;
+                                let fetched = market::fetch_latest_bars(&tok, &missing).await;
                                 store.quotes.update(|map| {
-                                    for q in &fetched { map.insert(q.symbol.clone(), q.clone()); }
+                                    for b in &fetched { map.insert(b.symbol.clone(), b.clone()); }
                                 });
-                                apply_quotes(fetched);
+                                apply_bars(fetched);
                                 quote_loading.set(false);
                             }
                         }
@@ -294,11 +292,11 @@ pub fn PortfolioPage() -> impl IntoView {
         quote_loading.set(true);
         let tok1 = token.clone();
         spawn_local(async move {
-            let quotes = market::fetch_quotes(&tok1, &syms).await;
+            let bars = market::fetch_latest_bars(&tok1, &syms).await;
             store.quotes.update(|map| {
-                for q in &quotes { map.insert(q.symbol.clone(), q.clone()); }
+                for b in &bars { map.insert(b.symbol.clone(), b.clone()); }
             });
-            apply_quotes(quotes);
+            apply_bars(bars);
             quote_loading.set(false);
         });
 
