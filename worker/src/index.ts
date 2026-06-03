@@ -286,7 +286,7 @@ async function handleTermRates(url: URL, env: Env): Promise<Response> {
 }
 
 function isStock(symbol: string): boolean {
-  return /\d/.test(symbol);
+  return !/\d/.test(symbol);
 }
 
 // GET /latest-bar?symbol=AAPL
