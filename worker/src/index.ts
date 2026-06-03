@@ -266,6 +266,25 @@ async function handleForwardVol(url: URL, env: Env): Promise<Response> {
   return jsonResp({ forward_vol, atm_vol_t1, atm_vol_t2, t1_years: T1, t2_years: T2 });
 }
 
+// GET /term-rates?symbol=AAPL
+// Returns implied risk-free rates per expiry from the latest pipeline snapshot.
+async function handleTermRates(url: URL, env: Env): Promise<Response> {
+  const symbol = url.searchParams.get('symbol')?.toUpperCase();
+  if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
+
+  const { results } = await env.DB.prepare(`
+    SELECT expiry, rate, num_contracts
+    FROM implied_rates
+    WHERE underlying = ?
+      AND snapshot_date = (SELECT MAX(snapshot_date) FROM implied_rates WHERE underlying = ?)
+    ORDER BY expiry
+  `).bind(symbol, symbol).all<{ expiry: string; rate: number; num_contracts: number | null }>();
+
+  if (!results.length) return jsonResp({ error: `No term rate data for ${symbol}` }, 404);
+
+  return jsonResp(results);
+}
+
 // GET /latest-bar?symbol=AAPL
 // Fetches the latest bar from Alpaca and caches the result in D1 for 15 minutes.
 async function handleLatestBar(url: URL, env: Env): Promise<Response> {
@@ -297,8 +316,8 @@ async function handleLatestBar(url: URL, env: Env): Promise<Response> {
     return jsonResp({ error: `Alpaca error: ${text}` }, alpacaResp.status);
   }
 
-  const data = await alpacaResp.json<{ bars: Record<string, { o: number; h: number; l: number; c: number; v: number; vw: number; n: number; t: string }> }>();
-  const bar = data.bars?.[symbol];
+  const data = await alpacaResp.json<{ bar: { o: number; h: number; l: number; c: number; v: number; vw: number; n: number; t: string }; symbol: string }>();
+  const bar = data.bar;
   if (!bar) return jsonResp({ error: `No bar data returned for ${symbol}` }, 404);
 
   await env.DB.prepare(`
@@ -356,6 +375,10 @@ export default {
 
       if (url.pathname === '/forward-vol' && request.method === 'GET') {
         return await handleForwardVol(url, env);
+      }
+
+      if (url.pathname === '/term-rates' && request.method === 'GET') {
+        return await handleTermRates(url, env);
       }
 
       if (url.pathname === '/latest-bar' && request.method === 'GET') {

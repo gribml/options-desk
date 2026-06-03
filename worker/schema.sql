@@ -59,6 +59,20 @@ CREATE TABLE IF NOT EXISTS vol_surface (
 CREATE INDEX IF NOT EXISTS idx_surface_underlying_snapshot
     ON vol_surface (underlying, snapshot_date DESC);
 
+-- Implied risk-free rates per expiry, backed out from ATM options by the data pipeline.
+-- One row per (underlying, snapshot_date, expiry); queried by /term-rates.
+CREATE TABLE IF NOT EXISTS implied_rates (
+    underlying    TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,  -- YYYY-MM-DD
+    expiry        TEXT NOT NULL,  -- YYYY-MM-DD
+    rate          REAL NOT NULL,  -- annualised risk-free rate (e.g. 0.0525 = 5.25%)
+    num_contracts INTEGER,        -- number of ATM contracts used in the average
+    PRIMARY KEY (underlying, snapshot_date, expiry)
+);
+
+CREATE INDEX IF NOT EXISTS idx_implied_rates_underlying_snapshot
+    ON implied_rates (underlying, snapshot_date DESC);
+
 -- Real-time cache populated by the /latest-bar worker route.
 -- One row per ticker; upserted on every fresh Alpaca fetch.
 CREATE TABLE IF NOT EXISTS latest_bars_cache (
