@@ -567,9 +567,9 @@ fn ScenarioForm(
                         let token = auth.token.get().unwrap_or_default();
                         let me2 = me_fill.clone();
                         spawn_local(async move {
-                            // Live spot price (use latest Alpaca bar)
-                            let spot = match market::fetch_latest_bar(&token, &sym).await {
-                                Ok(b) => { me2.price.set(format!("{:.2}", b.close)); b.close }
+                            // Live spot price
+                            let spot = match market::fetch_quote(&token, &sym).await {
+                                Ok(q) => { me2.price.set(format!("{:.2}", q.price)); q.price }
                                 Err(_) => return,
                             };
                             // ATM forward vol: nearest-expiry straddle from live option chain

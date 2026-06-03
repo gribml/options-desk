@@ -482,7 +482,7 @@ fn MarketInputsPanel(
                                 market_data.update(|map| {
                                     if let Some(m) = map.get_mut(&kp) {
                                         if let Ok(p) = m.price.parse::<f64>() {
-                                            let new_p = (p * (1.0 + dir * 0.01)).max(0.0);
+                                            let new_p = (p + 1.0 * dir).max(0.0);
                                             m.price = format!("{:.2}", new_p);
                                             if let Some(ref_p) = m.ref_price {
                                                 m.change = Some(new_p - ref_p);
