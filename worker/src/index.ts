@@ -285,6 +285,10 @@ async function handleTermRates(url: URL, env: Env): Promise<Response> {
   return jsonResp(results);
 }
 
+function isStock(symbol: string): boolean {
+  return /\d/.test(symbol);
+}
+
 // GET /latest-bar?symbol=AAPL
 // Fetches the latest bar from Alpaca and caches the result in D1 for 15 minutes.
 async function handleLatestBar(url: URL, env: Env): Promise<Response> {
@@ -306,8 +310,15 @@ async function handleLatestBar(url: URL, env: Env): Promise<Response> {
     return jsonResp({ ...cached, cached: true });
   }
 
+  let api_endpoint: string = "";
+  if (isStock(symbol)) {
+    api_endpoint = `v2/stocks/${encodeURIComponent(symbol)}/bars/latest`
+  } else {
+    api_endpoint = `v1beta1/options/quotes/latest?symbols=${encodeURIComponent(symbol)}&feed=indicative`
+  }
+
   const alpacaResp = await fetch(
-    `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(symbol)}/bars/latest`,
+    `https://data.alpaca.markets/${api_endpoint}`,
     { headers: { 'APCA-API-KEY-ID': env.ALPACA_KEY, 'APCA-API-SECRET-KEY': env.ALPACA_SECRET } },
   );
 
