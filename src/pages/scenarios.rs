@@ -1115,7 +1115,7 @@ fn ScenarioCard(
 
                     {has_market.then(|| view! {
                         <div class="border-t border-border pt-3">
-                            <p class="text-xs text-gray-500 mb-2">"Portfolio Greeks (scenario conditions)"</p>
+                            <p class="text-xs text-gray-500 mb-2">"New Portfolio Greeks"</p>
                             <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs font-mono">
                                 <span class="text-gray-500">"Δ "<span class="text-gray-200">{format!("{:.2}", greeks.delta)}</span></span>
                                 <span class="text-gray-500">"Γ "<span class="text-gray-200">{format!("{:.4}", greeks.gamma)}</span></span>

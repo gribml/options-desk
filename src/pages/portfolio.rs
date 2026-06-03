@@ -667,7 +667,7 @@ fn PositionRow(
             // Cost basis + implied tax row
             <div class="flex gap-6 pl-14 text-xs text-gray-500">
                 <span>
-                    "total "
+                    "cost "
                     <span class={if total_cost >= 0.0 { "text-gray-300" } else { "text-green-400" }}>
                         {fmt_cash(total_cost)}
                     </span>

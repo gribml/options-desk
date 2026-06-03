@@ -33,7 +33,7 @@ fn fmt_signed(v: f64, show_plus: bool) -> String {
         return format!("{}{:.2}", prefix, abs);
     };
     let prefix = if show_plus && scaled >= 0.0 { "+$" } else if scaled < 0.0 { "-$" } else { "$" };
-    format!("{}{:.1}{}", prefix, scaled.abs(), suffix)
+    format!("{}{:.2}{}", prefix, scaled.abs(), suffix)
 }
 
 /// Renders a currency value: full precision on desktop (≥640px), abbreviated on mobile.
