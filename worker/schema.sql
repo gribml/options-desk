@@ -58,3 +58,18 @@ CREATE TABLE IF NOT EXISTS vol_surface (
 
 CREATE INDEX IF NOT EXISTS idx_surface_underlying_snapshot
     ON vol_surface (underlying, snapshot_date DESC);
+
+-- Real-time cache populated by the /latest-bar worker route.
+-- One row per ticker; upserted on every fresh Alpaca fetch.
+CREATE TABLE IF NOT EXISTS latest_bars_cache (
+    symbol      TEXT NOT NULL PRIMARY KEY,
+    bar_time    TEXT NOT NULL,  -- ISO 8601 timestamp of the bar itself (from Alpaca)
+    fetched_at  TEXT NOT NULL,  -- ISO 8601 UTC timestamp of when we fetched from Alpaca
+    open        REAL,
+    high        REAL,
+    low         REAL,
+    close       REAL,
+    volume      REAL,
+    trade_count INTEGER,
+    vwap        REAL
+);

@@ -35,6 +35,8 @@ interface OptionChainEntry {
 interface Env {
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
+  ALPACA_KEY: string;
+  ALPACA_SECRET: string;
   DB: D1Database;
 }
 
@@ -264,6 +266,61 @@ async function handleForwardVol(url: URL, env: Env): Promise<Response> {
   return jsonResp({ forward_vol, atm_vol_t1, atm_vol_t2, t1_years: T1, t2_years: T2 });
 }
 
+// GET /latest-bar?symbol=AAPL
+// Fetches the latest bar from Alpaca and caches the result in D1 for 15 minutes.
+async function handleLatestBar(url: URL, env: Env): Promise<Response> {
+  const symbol = url.searchParams.get('symbol')?.toUpperCase();
+  if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
+
+  const cached = await env.DB.prepare(`
+    SELECT symbol, bar_time, fetched_at, open, high, low, close, volume, trade_count, vwap
+    FROM latest_bars_cache
+    WHERE symbol = ?
+      AND fetched_at >= datetime('now', '-15 minutes')
+  `).bind(symbol).first<{
+    symbol: string; bar_time: string; fetched_at: string;
+    open: number; high: number; low: number; close: number;
+    volume: number; trade_count: number; vwap: number;
+  }>();
+
+  if (cached) {
+    return jsonResp({ ...cached, cached: true });
+  }
+
+  const alpacaResp = await fetch(
+    `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(symbol)}/bars/latest`,
+    { headers: { 'APCA-API-KEY-ID': env.ALPACA_KEY, 'APCA-API-SECRET-KEY': env.ALPACA_SECRET } },
+  );
+
+  if (!alpacaResp.ok) {
+    const text = await alpacaResp.text();
+    return jsonResp({ error: `Alpaca error: ${text}` }, alpacaResp.status);
+  }
+
+  const data = await alpacaResp.json<{ bars: Record<string, { o: number; h: number; l: number; c: number; v: number; vw: number; n: number; t: string }> }>();
+  const bar = data.bars?.[symbol];
+  if (!bar) return jsonResp({ error: `No bar data returned for ${symbol}` }, 404);
+
+  await env.DB.prepare(`
+    INSERT OR REPLACE INTO latest_bars_cache
+      (symbol, bar_time, fetched_at, open, high, low, close, volume, trade_count, vwap)
+    VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
+  `).bind(symbol, bar.t, bar.o, bar.h, bar.l, bar.c, bar.v, bar.n, bar.vw).run();
+
+  return jsonResp({
+    symbol,
+    bar_time: bar.t,
+    open: bar.o,
+    high: bar.h,
+    low: bar.l,
+    close: bar.c,
+    volume: bar.v,
+    trade_count: bar.n,
+    vwap: bar.vw,
+    cached: false,
+  });
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 export default {
@@ -299,6 +356,10 @@ export default {
 
       if (url.pathname === '/forward-vol' && request.method === 'GET') {
         return await handleForwardVol(url, env);
+      }
+
+      if (url.pathname === '/latest-bar' && request.method === 'GET') {
+        return await handleLatestBar(url, env);
       }
 
       return jsonResp({ error: 'Not found' }, 404);
