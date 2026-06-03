@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Utc};
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -625,6 +625,11 @@ fn PositionRow(
     let mark_value = metrics.as_ref().map(|m| m.mark_value);
     let pnl_value  = metrics.as_ref().map(|m| m.pnl);
 
+    let total_cost = position.total_cost();
+    let is_lt = (Utc::now().date_naive() - position.opened_at.date_naive()).num_days() > 365;
+    let tax_rate = if is_lt { 0.20_f64 } else { 0.37_f64 };
+    let implied_tax = metrics.as_ref().map(|m| m.pnl.max(0.0) * tax_rate);
+
     view! {
         <div class="bg-panel border border-border rounded-lg p-3 space-y-2">
             <div class="flex items-center justify-between gap-4">
@@ -661,15 +666,38 @@ fn PositionRow(
                 </div>
             </div>
 
-            {metrics.as_ref().filter(|_| is_option).map(|m| {
+            // Cost basis + implied tax row
+            <div class="flex gap-6 pl-14 text-xs text-gray-500">
+                <span>
+                    "total "
+                    <span class={if total_cost >= 0.0 { "text-gray-300" } else { "text-green-400" }}>
+                        {fmt_cash(total_cost)}
+                    </span>
+                </span>
+                <span>
+                    "~tax "
+                    {match implied_tax {
+                        Some(t) if t > 0.0 => view! {
+                            <span class="text-orange-300">{fmt_cash(-t)}</span>
+                        }.into_any(),
+                        Some(_) => view! { <span class="text-gray-600">"—"</span> }.into_any(),
+                        None    => view! { <span class="text-gray-600">"—"</span> }.into_any(),
+                    }}
+                </span>
+            </div>
+
+            // Greeks row — delta for all positions, full Greeks for options
+            {metrics.as_ref().map(|m| {
                 let (d, g, v, t, r) = (m.delta, m.gamma, m.vega, m.theta, m.rho);
                 view! {
                     <div class="flex gap-4 pl-14 text-xs font-mono text-gray-400">
                         <span>"Δ " <GreekVal v=d fmt="f1" /></span>
-                        <span>"Γ " <GreekVal v=g fmt="f4" /></span>
-                        <span>"ν " <GreekVal v=v fmt="$" /></span>
-                        <span>"θ " <GreekVal v=t fmt="$" /></span>
-                        <span>"ρ " <GreekVal v=r fmt="$" /></span>
+                        {is_option.then(|| view! {
+                            <span>"Γ " <GreekVal v=g fmt="f4" /></span>
+                            <span>"ν " <GreekVal v=v fmt="$" /></span>
+                            <span>"θ " <GreekVal v=t fmt="$" /></span>
+                            <span>"ρ " <GreekVal v=r fmt="$" /></span>
+                        })}
                     </div>
                 }
             })}
