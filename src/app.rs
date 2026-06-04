@@ -113,12 +113,24 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| view! { <NotFound /> }>
                     <Route path=path!("/") view=move || view! { <Redirect /> } />
                     <Route path=path!("/login") view=LoginPage />
-                    <Route path=path!("/pricer") view=PricerPage />
-                    <Route path=path!("/portfolio") view=PortfolioPage />
-                    <Route path=path!("/scenarios") view=ScenariosPage />
+                    <Route path=path!("/pricer") view=move || view! { <Protected><PricerPage /></Protected> } />
+                    <Route path=path!("/portfolio") view=move || view! { <Protected><PortfolioPage /></Protected> } />
+                    <Route path=path!("/scenarios") view=move || view! { <Protected><ScenariosPage /></Protected> } />
                 </Routes>
             </main>
         </Router>
+    }
+}
+
+#[component]
+fn Protected(children: ChildrenFn) -> impl IntoView {
+    let auth = use_context::<AuthState>().expect("AuthState missing");
+    view! {
+        {move || if auth.is_authenticated() {
+            children().into_any()
+        } else {
+            view! { <leptos_router::components::Redirect path="/login" /> }.into_any()
+        }}
     }
 }
 
