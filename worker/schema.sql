@@ -78,7 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_implied_rates_underlying_snapshot
 CREATE TABLE IF NOT EXISTS latest_bars_cache (
     symbol      TEXT NOT NULL PRIMARY KEY,
     bar_time    TEXT NOT NULL,  -- ISO 8601 timestamp of the bar itself (from Alpaca)
-    fetched_at  TEXT NOT NULL,  -- ISO 8601 UTC timestamp of when we fetched from Alpaca
+    fetched_at  TEXT NOT NULL UNIQUE,   -- ISO 8601 UTC timestamp of when we fetched from Alpaca
     open        REAL,
     high        REAL,
     low         REAL,
@@ -87,3 +87,7 @@ CREATE TABLE IF NOT EXISTS latest_bars_cache (
     trade_count INTEGER,
     vwap        REAL
 );
+
+
+CREATE INDEX IF NOT EXISTS idx_latest_bars_cache_symbol_fetched_at
+    ON latest_bars_cache (symbol, fetched_at DESC);
