@@ -332,7 +332,7 @@ async function handleLatestBar(url: URL, env: Env): Promise<Response> {
   if (!bar) return jsonResp({ error: `No bar data returned for ${symbol}` }, 404);
 
   await env.DB.prepare(`
-    INSERT INTO latest_bars_cache
+    INSERT OR REPLACE INTO latest_bars_cache
       (symbol, bar_time, fetched_at, open, high, low, close, volume, trade_count, vwap)
     VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
   `).bind(symbol, bar.t, bar.o, bar.h, bar.l, bar.c, bar.v, bar.n, bar.vw).run();
