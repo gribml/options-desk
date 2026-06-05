@@ -331,11 +331,12 @@ async function handleLatestBar(url: URL, env: Env): Promise<Response> {
   const bar = data.bar;
   if (!bar) return jsonResp({ error: `No bar data returned for ${symbol}` }, 404);
 
+  const now = new Date().toISOString();
   await env.DB.prepare(`
     INSERT INTO latest_bars_cache
       (symbol, bar_time, fetched_at, open, high, low, close, volume, trade_count, vwap)
     VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
-  `).bind(symbol, bar.t, bar.o, bar.h, bar.l, bar.c, bar.v, bar.n, bar.vw).run();
+  `).bind(symbol, bar.t, now, bar.o, bar.h, bar.l, bar.c, bar.v, bar.n, bar.vw).run();
 
   return jsonResp({
     symbol,
