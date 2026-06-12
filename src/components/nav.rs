@@ -18,6 +18,7 @@ pub fn Nav() -> impl IntoView {
                             <NavLink href="/portfolio">"Portfolio"</NavLink>
                             <NavLink href="/pricer">"Pricer"</NavLink>
                             <NavLink href="/scenarios">"Scenarios"</NavLink>
+                            <NavLink href="/tax">"Taxes"</NavLink>
                         </div>
                     </Show>
                 </div>

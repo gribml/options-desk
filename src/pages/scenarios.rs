@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use leptos::prelude::*;
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
@@ -89,8 +89,8 @@ fn evaluate(scenario: &Scenario, positions: &[Position]) -> ScenarioResult {
         }
     }
 
-    net_cash -= st_gain.max(0.0) * 0.37 + lt_gain.max(0.0) * 0.20;
-
+    // Tax is no longer subtracted here — it's computed per-card by the Worker
+    // against the user's income profile. `net_cash` is pre-tax.
     ScenarioResult { evaluated_at: Utc::now(), trade_results, assignments, net_cash,
         total_st_gain: st_gain, total_lt_gain: lt_gain, greeks }
 }
@@ -970,13 +970,11 @@ fn ScenarioCard(
 ) -> impl IntoView {
     let expanded = RwSignal::new(false);
 
-    let st_rate = 0.37_f64;
-    let lt_rate = 0.20_f64;
-    let tax = result.tax_estimate(st_rate, lt_rate);
-    let after_tax_cash = result.net_cash;
+    let tax = RwSignal::new(Option::<f64>::None);
+    let tax_failed = RwSignal::new(false);
+    let tax_year = scenario.evaluation_date.year();
 
     let cash_class = if result.net_cash >= 0.0 { "text-green-400" } else { "text-red-400" };
-    let at_class   = if after_tax_cash >= 0.0  { "text-green-300" } else { "text-red-300" };
 
     let id            = scenario.id;
     let is_archived   = scenario.archived;
@@ -990,6 +988,23 @@ fn ScenarioCard(
     let total_st      = result.total_st_gain;
     let total_lt      = result.total_lt_gain;
     let has_market    = !market_inputs.is_empty();
+
+    // Marginal federal tax for this scenario's realized gains, computed by the
+    // Worker against the user's profile for the scenario's tax year.
+    Effect::new(move |_| {
+        let tok = match auth.token.get() { Some(t) => t, None => return };
+        tax_failed.set(false);
+        if total_st.abs() < 1e-9 && total_lt.abs() < 1e-9 {
+            tax.set(Some(0.0));
+            return;
+        }
+        spawn_local(async move {
+            match market::estimate_trade_tax(&tok, tax_year, total_st, total_lt).await {
+                Ok(r) => tax.set(Some(r.tax)),
+                Err(_) => { tax.set(None); tax_failed.set(true); }
+            }
+        });
+    });
 
     let toggle_archive = move |ev: web_sys::MouseEvent| {
         ev.stop_propagation();
@@ -1105,11 +1120,35 @@ fn ScenarioCard(
                             <p class="text-gray-500 mb-1">"Realized gains"</p>
                             <p class="text-yellow-300">"ST: " {fmt_cash(total_st)}</p>
                             <p class="text-blue-300">"LT: " {fmt_cash(total_lt)}</p>
-                            <p class="text-orange-300 mt-1">"Est. tax (37% / 20%): " {fmt_cash(-tax)}</p>
+                            <p class="text-orange-300 mt-1">
+                                {move || {
+                                    if tax_failed.get() {
+                                        view! {
+                                            <span>
+                                                {format!("Est. federal tax ({tax_year}): — ")}
+                                                <a href="/tax" class="underline text-gray-400">"set up Taxes"</a>
+                                            </span>
+                                        }.into_any()
+                                    } else if let Some(t) = tax.get() {
+                                        view! {
+                                            <span>{format!("Est. federal tax ({tax_year}): {}", fmt_cash(-t))}</span>
+                                        }.into_any()
+                                    } else {
+                                        view! {
+                                            <span>{format!("Est. federal tax ({tax_year}): computing…")}</span>
+                                        }.into_any()
+                                    }
+                                }}
+                            </p>
                         </div>
                         <div class="text-right">
                             <p class="text-gray-500 mb-1">"After-tax net cash"</p>
-                            <p class=format!("text-xl font-semibold {}", at_class)><Num value=after_tax_cash signed=true /></p>
+                            <p class=move || {
+                                let after = net_cash - tax.get().unwrap_or(0.0);
+                                format!("text-xl font-semibold {}", if after >= 0.0 { "text-green-300" } else { "text-red-300" })
+                            }>
+                                {move || view! { <Num value={net_cash - tax.get().unwrap_or(0.0)} signed=true /> }}
+                            </p>
                         </div>
                     </div>
 

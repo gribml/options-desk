@@ -128,10 +128,6 @@ impl ScenarioResult {
     pub fn total_realized(&self) -> f64 {
         self.total_st_gain + self.total_lt_gain
     }
-
-    pub fn tax_estimate(&self, st_rate: f64, lt_rate: f64) -> f64 {
-        self.total_st_gain.max(0.0) * st_rate + self.total_lt_gain.max(0.0) * lt_rate
-    }
 }
 
 // ── Scenario ──────────────────────────────────────────────────────────────────

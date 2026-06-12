@@ -2,7 +2,7 @@ use gloo_net::http::Request;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{SUPABASE_ANON_KEY, SUPABASE_URL};
-use crate::models::{position::Position, scenario::Scenario};
+use crate::models::{position::Position, scenario::Scenario, tax::TaxProfile};
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -246,5 +246,61 @@ pub async fn delete_scenario(token: &str, scenario_id: &str) -> Result<(), Strin
         Ok(())
     } else {
         Err(format!("Delete scenario failed: {}", resp.status()))
+    }
+}
+
+// ── Tax profiles ──────────────────────────────────────────────────────────────
+
+/// Fetch all of the user's tax profiles (one per year).
+pub async fn fetch_tax_profiles(token: &str, user_id: &str) -> Result<Vec<TaxProfile>, String> {
+    let url = format!(
+        "{}?user_id=eq.{}&select=payload&order=tax_year.desc",
+        rest_url("tax_profiles"),
+        user_id
+    );
+    let resp = authed_get(&url, token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.ok() {
+        return Err(format!("Fetch tax profiles failed: {}", resp.status()));
+    }
+
+    let rows: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(rows.into_iter()
+        .filter_map(|r| serde_json::from_value::<TaxProfile>(r["payload"].clone()).ok())
+        .collect())
+}
+
+/// Upsert a single year's tax profile. Resolves on the (user_id, tax_year)
+/// unique constraint, so `tax_year` is sent as a top-level column.
+pub async fn upsert_tax_profile(
+    token: &str,
+    user_id: &str,
+    profile: &TaxProfile,
+) -> Result<(), String> {
+    let body = serde_json::json!({
+        "id": profile.id.to_string(),
+        "user_id": user_id,
+        "tax_year": profile.tax_year,
+        "payload": serde_json::to_value(profile).map_err(|e| e.to_string())?,
+    });
+
+    let url = format!("{}?on_conflict=user_id,tax_year", rest_url("tax_profiles"));
+    let resp = authed_post(&url, token)
+        .header("Prefer", "resolution=merge-duplicates,return=minimal")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.ok() {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("Upsert tax profile failed: {} — {}", status, body))
     }
 }

@@ -1,4 +1,5 @@
 use gloo_net::http::Request;
+use serde::{Deserialize, Serialize};
 
 use crate::config::WORKER_URL;
 use crate::models::market::{ForwardVolResult, LatestBar, OptionChainEntry, OptionMetaEntry, OptionQuote, Quote};
@@ -137,6 +138,82 @@ pub async fn fetch_forward_vol(
     } else {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         Err(body["error"].as_str().unwrap_or("Forward vol fetch failed").to_string())
+    }
+}
+
+// ── Tax (federal, computed by the Worker against the user's income profile) ────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaxItemRequest {
+    pub id: String,
+    pub st_gain: f64,
+    pub lt_gain: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaxResult {
+    pub tax: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaxItemResult {
+    pub id: String,
+    pub tax: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaxBatchResult {
+    pub results: Vec<TaxItemResult>,
+}
+
+/// Marginal federal tax incurred by realizing `st_gain`/`lt_gain` in `tax_year`,
+/// computed against the user's stored income profile for that year.
+pub async fn estimate_trade_tax(
+    token: &str,
+    tax_year: i32,
+    st_gain: f64,
+    lt_gain: f64,
+) -> Result<TaxResult, String> {
+    let url = format!("{}/tax", worker_base());
+    let body = serde_json::json!({ "tax_year": tax_year, "st_gain": st_gain, "lt_gain": lt_gain });
+    let resp = Request::post(&url)
+        .header("Authorization", &format!("Bearer {}", token))
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.ok() {
+        resp.json::<TaxResult>().await.map_err(|e| e.to_string())
+    } else {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Err(body["error"].as_str().unwrap_or("Tax estimate failed").to_string())
+    }
+}
+
+/// Batch marginal-tax estimate (one call, each item against the same baseline) —
+/// used by the portfolio view for implied-liquidation tax per position.
+pub async fn estimate_portfolio_tax(
+    token: &str,
+    tax_year: i32,
+    items: Vec<TaxItemRequest>,
+) -> Result<TaxBatchResult, String> {
+    let url = format!("{}/tax", worker_base());
+    let body = serde_json::json!({ "tax_year": tax_year, "items": items });
+    let resp = Request::post(&url)
+        .header("Authorization", &format!("Bearer {}", token))
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.ok() {
+        resp.json::<TaxBatchResult>().await.map_err(|e| e.to_string())
+    } else {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Err(body["error"].as_str().unwrap_or("Portfolio tax estimate failed").to_string())
     }
 }
 
