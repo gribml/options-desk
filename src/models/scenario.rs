@@ -74,6 +74,9 @@ impl ScenarioTrade {
     }
 
     pub fn is_long_term(&self, eval_date: NaiveDate) -> bool {
+        if self.option_spec.is_some() {
+            return false; // options are always short-term regardless of holding period
+        }
         self.closes_opened_at
             .map(|d| (eval_date - d).num_days() > 365)
             .unwrap_or(false)

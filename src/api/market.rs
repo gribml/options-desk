@@ -153,6 +153,7 @@ pub struct TaxItemRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TaxResult {
     pub tax: f64,
+    pub baseline_tax: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

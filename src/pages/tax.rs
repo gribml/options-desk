@@ -146,6 +146,52 @@ fn YearSection(
     let err = RwSignal::new(Option::<String>::None);
     let saving = RwSignal::new(false);
 
+    // True when any form field differs from the last saved revision.
+    let is_dirty = Memo::new(move |_| {
+        let parse_f = |s: &str| -> f64 { s.trim().parse().unwrap_or(0.0) };
+        filing_status.get() != seed.filing_status
+            || deduction_choice.get() != seed.deduction_choice
+            || (parse_f(&w2.get())       - seed.w2_income).abs()            > 0.005
+            || (parse_f(&interest.get()) - seed.interest_income).abs()      > 0.005
+            || (parse_f(&ord_div.get())  - seed.ordinary_dividends).abs()   > 0.005
+            || (parse_f(&qual_div.get()) - seed.qualified_dividends).abs()  > 0.005
+            || (parse_f(&st_gains.get()) - seed.st_capital_gains).abs()     > 0.005
+            || (parse_f(&lt_gains.get()) - seed.lt_capital_gains).abs()     > 0.005
+            || (parse_f(&rental.get())   - seed.rental_income).abs()        > 0.005
+            || (parse_f(&itemized.get()) - seed.itemized_deductions).abs()  > 0.005
+            || (parse_f(&cf_st.get())    - seed.carryforward_st_loss).abs() > 0.005
+            || (parse_f(&cf_lt.get())    - seed.carryforward_lt_loss).abs() > 0.005
+    });
+
+    let apply_revision_to_form = move |cur: TaxRevision| {
+        filing_status.set(cur.filing_status);
+        deduction_choice.set(cur.deduction_choice);
+        w2.set(money_str(cur.w2_income));
+        interest.set(money_str(cur.interest_income));
+        ord_div.set(money_str(cur.ordinary_dividends));
+        qual_div.set(money_str(cur.qualified_dividends));
+        st_gains.set(money_str(cur.st_capital_gains));
+        lt_gains.set(money_str(cur.lt_capital_gains));
+        rental.set(money_str(cur.rental_income));
+        itemized.set(money_str(cur.itemized_deductions));
+        cf_st.set(money_str(cur.carryforward_st_loss));
+        cf_lt.set(money_str(cur.carryforward_lt_loss));
+    };
+
+    let on_delete_revision = move |entered_at: chrono::DateTime<Utc>| {
+        let token = auth.token.get().unwrap_or_default();
+        let user_id = auth.user_id.get().unwrap_or_default();
+        let id = profile_id.get().unwrap_or_else(Uuid::new_v4);
+        revisions.update(|rs| rs.retain(|r| r.entered_at != entered_at));
+        if let Some(cur) = revisions.get_untracked().last().cloned() {
+            apply_revision_to_form(cur);
+        }
+        let profile = TaxProfile { id, tax_year: year, revisions: revisions.get_untracked() };
+        spawn_local(async move {
+            let _ = supabase::upsert_tax_profile(&token, &user_id, &profile).await;
+        });
+    };
+
     let on_save = move |_| {
             // Parse all money fields; empty → 0.0, invalid → error.
             let parse = |sig: RwSignal<String>, name: &str| -> Result<f64, String> {
@@ -275,14 +321,18 @@ fn YearSection(
                     {move || err.get().map(|e| view! { <p class="text-sm text-red-400">{e}</p> })}
 
                     <button
-                        class="text-sm px-4 py-1.5 rounded bg-blue-600 hover:bg-blue-500 transition-colors disabled:opacity-50"
-                        prop:disabled=move || saving.get()
+                        class="text-sm px-4 py-1.5 rounded bg-blue-600 hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        prop:disabled=move || saving.get() || !is_dirty.get()
                         on:click=on_save
                     >
                         {move || if saving.get() { "Saving…" } else { "Save" }}
                     </button>
 
-                    <RevisionHistory revisions=revisions />
+                    <RevisionHistory
+                        revisions=revisions
+                        on_restore=move |r: TaxRevision| apply_revision_to_form(r)
+                        on_delete=on_delete_revision
+                    />
                 </div>
             })}
         </div>
@@ -290,40 +340,114 @@ fn YearSection(
 }
 
 #[component]
-fn RevisionHistory(revisions: RwSignal<Vec<TaxRevision>>) -> impl IntoView {
+fn RevisionHistory(
+    revisions: RwSignal<Vec<TaxRevision>>,
+    #[prop(into)] on_restore: Callback<TaxRevision>,
+    #[prop(into)] on_delete: Callback<chrono::DateTime<Utc>>,
+) -> impl IntoView {
+    let show_history = RwSignal::new(false);
+
     view! {
         {move || {
             let revs = revisions.get();
-            // Skip the current (last) revision; show prior edits, newest first.
+            // Need at least 2 revisions to have any history to show.
             if revs.len() <= 1 {
                 return None;
             }
-            let prior: Vec<TaxRevision> = revs.iter().rev().skip(1).cloned().collect();
+            // Pairs: (newer, older) — diff newer against older to show what changed.
+            // We also keep the older revision so the user can restore to it.
+            let pairs: Vec<(TaxRevision, TaxRevision)> = revs
+                .windows(2)
+                .map(|w| (w[1].clone(), w[0].clone()))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+
             Some(view! {
                 <div class="pt-2">
-                    <h3 class="text-xs font-medium text-gray-400 mb-2">"Edit history"</h3>
-                    <div class="space-y-1">
-                        {prior.into_iter().map(|r| {
-                            let when = r.entered_at.format("%d %b %Y %H:%M").to_string();
-                            let summary = format!(
-                                "{} · W-2 {} · ST {} · LT {}",
-                                r.filing_status.label(),
-                                fmt_cash(r.w2_income),
-                                fmt_cash(r.st_capital_gains),
-                                fmt_cash(r.lt_capital_gains),
-                            );
-                            view! {
-                                <div class="flex items-baseline justify-between text-xs text-gray-500 gap-3">
-                                    <span class="whitespace-nowrap">{when}</span>
-                                    <span class="text-right">{summary}</span>
-                                </div>
-                            }
-                        }).collect_view()}
-                    </div>
+                    <button
+                        class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                        on:click=move |_| show_history.update(|v| *v = !*v)
+                    >
+                        {move || if show_history.get() { "▾ Hide history" } else { "▸ Edit history" }}
+                    </button>
+                    {move || show_history.get().then(|| view! {
+                        <div class="mt-2 space-y-2">
+                            {pairs.clone().into_iter().map(|(newer, older)| {
+                                let when = newer.entered_at.format("%d %b %Y %H:%M").to_string();
+                                let changes = revision_diff(&older, &newer);
+                                let restore_to = older.clone();
+                                let delete_at = newer.entered_at;
+                                view! {
+                                    <div class="text-xs text-gray-500 border-l border-border pl-2">
+                                        <div class="flex items-baseline justify-between gap-2">
+                                            <span class="text-gray-400">{when}</span>
+                                            <div class="flex gap-2 shrink-0">
+                                                <button
+                                                    class="text-gray-600 hover:text-blue-400 transition-colors"
+                                                    title="Restore these values to the form"
+                                                    on:click=move |_| on_restore.run(restore_to.clone())
+                                                >"↩ restore"</button>
+                                                <button
+                                                    class="text-gray-600 hover:text-red-400 transition-colors"
+                                                    title="Delete this revision"
+                                                    on:click=move |_| on_delete.run(delete_at)
+                                                >"✕"</button>
+                                            </div>
+                                        </div>
+                                        {if changes.is_empty() {
+                                            view! { <span class="italic">"no changes"</span> }.into_any()
+                                        } else {
+                                            view! {
+                                                <ul class="mt-0.5 space-y-0">
+                                                    {changes.into_iter().map(|c| view! {
+                                                        <li>{c}</li>
+                                                    }).collect_view()}
+                                                </ul>
+                                            }.into_any()
+                                        }}
+                                    </div>
+                                }
+                            }).collect_view()}
+                        </div>
+                    })}
                 </div>
             })
         }}
     }
+}
+
+/// Returns a list of human-readable change descriptions between two revisions.
+fn revision_diff(older: &TaxRevision, newer: &TaxRevision) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    if older.filing_status != newer.filing_status {
+        changes.push(format!("Filing: {} → {}", older.filing_status.label(), newer.filing_status.label()));
+    }
+    if older.deduction_choice != newer.deduction_choice {
+        changes.push(format!("Deduction: {} → {}", older.deduction_choice.as_str(), newer.deduction_choice.as_str()));
+    }
+
+    let money_fields: &[(&str, f64, f64)] = &[
+        ("W-2",              older.w2_income,            newer.w2_income),
+        ("Interest",         older.interest_income,      newer.interest_income),
+        ("Ord. dividends",   older.ordinary_dividends,   newer.ordinary_dividends),
+        ("Qual. dividends",  older.qualified_dividends,  newer.qualified_dividends),
+        ("ST gains",         older.st_capital_gains,     newer.st_capital_gains),
+        ("LT gains",         older.lt_capital_gains,     newer.lt_capital_gains),
+        ("Rental",           older.rental_income,        newer.rental_income),
+        ("Itemized ded.",    older.itemized_deductions,  newer.itemized_deductions),
+        ("CF ST loss",       older.carryforward_st_loss, newer.carryforward_st_loss),
+        ("CF LT loss",       older.carryforward_lt_loss, newer.carryforward_lt_loss),
+    ];
+    for (label, old_v, new_v) in money_fields {
+        if (old_v - new_v).abs() > 0.005 {
+            changes.push(format!("{}: {} → {}", label, fmt_cash(*old_v), fmt_cash(*new_v)));
+        }
+    }
+
+    changes
 }
 
 const SELECT_CLS: &str =

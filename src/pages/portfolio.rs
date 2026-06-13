@@ -292,7 +292,8 @@ pub fn PortfolioPage() -> impl IntoView {
                 let m = m.as_ref()?;
                 // Full pnl (incl. losses) routed by holding period; the marginal
                 // engine handles negatives — do not clamp.
-                let is_lt = (Utc::now().date_naive() - p.opened_at.date_naive()).num_days() > 365;
+                let is_lt = p.option_spec.is_none()
+                    && (Utc::now().date_naive() - p.opened_at.date_naive()).num_days() > 365;
                 Some(market::TaxItemRequest {
                     id: p.id.to_string(),
                     st_gain: if is_lt { 0.0 } else { m.pnl },

@@ -398,7 +398,7 @@ const NIIT_THRESHOLD: Record<Filing, number> = {
 // 2025 = Rev. Proc. 2024-40; 2026 = Rev. Proc. 2025-32.
 const TAX_CONSTANTS: Record<number, YearConstants> = {
   2025: {
-    stdDeduction: { single: 15_000, mfj: 30_000, mfs: 15_000, hoh: 22_500 },
+    stdDeduction: { single: 15_750, mfj: 31_500, mfs: 15_750, hoh: 23_625 },
     ordinary: {
       single: [
         { upTo: 11_925, rate: 0.10 }, { upTo: 48_475, rate: 0.12 },
@@ -645,7 +645,8 @@ async function handleTax(
     { st_gain: body.st_gain ?? 0, lt_gain: body.lt_gain ?? 0 },
     taxYear,
   );
-  return jsonResp({ tax });
+  const baseline_tax = computeFederalTax(baseline, taxYear);
+  return jsonResp({ tax, baseline_tax });
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────

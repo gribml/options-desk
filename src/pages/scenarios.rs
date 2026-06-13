@@ -69,22 +69,70 @@ fn evaluate(scenario: &Scenario, positions: &[Position]) -> ScenarioResult {
         });
     }
 
+    // Compute option Greeks given a signed quantity and market inputs.
+    let option_greeks = |qty: f64, spec: &OptionSpec, mi: &ScenarioMarketInput| -> ScenarioGreeks {
+        let t = (spec.expiry - eval_date).num_days().max(0) as f64 / 365.0;
+        if t <= 0.0 { return ScenarioGreeks::default(); }
+        let r = BsInputs { spot: mi.price, strike: spec.strike, expiry_years: t, vol: mi.vol, rate: mi.rate }
+            .greeks(spec.option_type);
+        let m = qty * 100.0;
+        ScenarioGreeks { delta: r.delta*m, gamma: r.gamma*m, vega: r.vega*m, theta: r.theta*m, rho: r.rho*m }
+    };
+    let add = |acc: &mut ScenarioGreeks, g: ScenarioGreeks| {
+        acc.delta += g.delta; acc.gamma += g.gamma;
+        acc.vega  += g.vega;  acc.theta += g.theta; acc.rho += g.rho;
+    };
+    let sub = |acc: &mut ScenarioGreeks, g: ScenarioGreeks| {
+        acc.delta -= g.delta; acc.gamma -= g.gamma;
+        acc.vega  -= g.vega;  acc.theta -= g.theta; acc.rho -= g.rho;
+    };
+
     let mut greeks = ScenarioGreeks::default();
+
+    // 1. Existing portfolio.
     for pos in positions {
         let qty = pos.quantity as f64;
         match &pos.option_spec {
             None => { greeks.delta += qty; }
             Some(spec) => {
-                let mi = match scenario.market_inputs.iter().find(|m| m.symbol == pos.symbol) {
-                    Some(m) => m, None => continue,
-                };
-                let t = (spec.expiry - eval_date).num_days().max(0) as f64 / 365.0;
-                if t <= 0.0 { continue; }
-                let r = BsInputs { spot: mi.price, strike: spec.strike, expiry_years: t, vol: mi.vol, rate: mi.rate }
-                    .greeks(spec.option_type);
-                let m = qty * 100.0;
-                greeks.delta += r.delta * m; greeks.gamma += r.gamma * m;
-                greeks.vega  += r.vega  * m; greeks.theta += r.theta * m; greeks.rho += r.rho * m;
+                if let Some(mi) = scenario.market_inputs.iter().find(|m| m.symbol == pos.symbol) {
+                    add(&mut greeks, option_greeks(qty, spec, mi));
+                }
+            }
+        }
+    }
+
+    // 2. Subtract Greeks for positions being closed by trades.
+    for trade in &scenario.trades {
+        if let Some(pos_id) = trade.closes_position_id {
+            if let Some(pos) = positions.iter().find(|p| p.id == pos_id) {
+                let frac = trade.contracts as f64 / pos.quantity.unsigned_abs().max(1) as f64;
+                let qty = pos.quantity as f64 * frac;
+                match &pos.option_spec {
+                    None => { greeks.delta -= qty; }
+                    Some(spec) => {
+                        if let Some(mi) = scenario.market_inputs.iter().find(|m| m.symbol == pos.symbol) {
+                            sub(&mut greeks, option_greeks(qty, spec, mi));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Add Greeks for new positions opened by trades (no closes_position_id).
+    for trade in &scenario.trades {
+        if trade.closes_position_id.is_some() { continue; }
+        let qty = match trade.direction {
+            TradeDirection::Buy  =>  trade.contracts as f64,
+            TradeDirection::Sell => -(trade.contracts as f64),
+        };
+        match &trade.option_spec {
+            None => { greeks.delta += qty; }
+            Some(spec) => {
+                if let Some(mi) = scenario.market_inputs.iter().find(|m| m.symbol == trade.symbol) {
+                    add(&mut greeks, option_greeks(qty, spec, mi));
+                }
             }
         }
     }
@@ -897,9 +945,15 @@ fn TradeEntryRow(
                                     }
                                 >
                                     <option value="">"— expiry —"</option>
-                                    {move || expiries.get().into_iter().map(|exp| {
-                                        view! { <option value=exp.clone()>{exp.clone()}</option> }
-                                    }).collect_view()}
+                                    {move || {
+                                        let list = expiries.get();
+                                        let current = entry.expiry.get_untracked();
+                                        let show_saved = !current.is_empty() && !list.contains(&current);
+                                        list.into_iter()
+                                            .chain(show_saved.then(|| current).into_iter())
+                                            .map(|exp| view! { <option value=exp.clone()>{exp.clone()}</option> })
+                                            .collect_view()
+                                    }}
                                 </select>
                                 <select
                                     class=MICRO_CLS
@@ -908,10 +962,19 @@ fn TradeEntryRow(
                                     on:change=move |ev| entry.strike.set(event_target_value(&ev))
                                 >
                                     <option value="">"— strike —"</option>
-                                    {move || strikes.get().into_iter().map(|s| {
-                                        let val = format!("{}", s);
-                                        view! { <option value=val.clone()>{format!("${:.0}", s)}</option> }
-                                    }).collect_view()}
+                                    {move || {
+                                        let list = strikes.get();
+                                        let current = entry.strike.get_untracked();
+                                        let current_f: Option<f64> = current.trim().parse().ok();
+                                        let show_saved = current_f.is_some() && !list.contains(current_f.as_ref().unwrap());
+                                        list.into_iter()
+                                            .chain(show_saved.then(|| current_f.unwrap()).into_iter())
+                                            .map(|s| {
+                                                let val = format!("{}", s);
+                                                view! { <option value=val.clone()>{format!("${:.0}", s)}</option> }
+                                            })
+                                            .collect_view()
+                                    }}
                                 </select>
                             }.into_any()
                         }
@@ -971,10 +1034,11 @@ fn ScenarioCard(
     let expanded = RwSignal::new(false);
 
     let tax = RwSignal::new(Option::<f64>::None);
+    let baseline_tax = RwSignal::new(Option::<f64>::None);
     let tax_failed = RwSignal::new(false);
     let tax_year = scenario.evaluation_date.year();
 
-    let cash_class = if result.net_cash >= 0.0 { "text-green-400" } else { "text-red-400" };
+    let cash_class;
 
     let id            = scenario.id;
     let is_archived   = scenario.archived;
@@ -987,6 +1051,8 @@ fn ScenarioCard(
     let net_cash      = result.net_cash;
     let total_st      = result.total_st_gain;
     let total_lt      = result.total_lt_gain;
+    let after_tax_cash = move || net_cash - tax.get().unwrap_or(0.0);
+    cash_class = move || if after_tax_cash() >= 0.0 { "text-green-400" } else { "text-red-400" };
     let has_market    = !market_inputs.is_empty();
 
     // Marginal federal tax for this scenario's realized gains, computed by the
@@ -1000,8 +1066,8 @@ fn ScenarioCard(
         }
         spawn_local(async move {
             match market::estimate_trade_tax(&tok, tax_year, total_st, total_lt).await {
-                Ok(r) => tax.set(Some(r.tax)),
-                Err(_) => { tax.set(None); tax_failed.set(true); }
+                Ok(r) => { tax.set(Some(r.tax)); baseline_tax.set(Some(r.baseline_tax)); }
+                Err(_) => { tax.set(None); baseline_tax.set(None); tax_failed.set(true); }
             }
         });
     });
@@ -1038,7 +1104,9 @@ fn ScenarioCard(
                 <div class="flex items-center gap-2 shrink-0">
                     <div class="text-right mr-2">
                         <p class="text-xs text-gray-500">"Net cash"</p>
-                        <p class=format!("text-lg font-semibold {}", cash_class)><Num value=net_cash signed=true /></p>
+                        <p class=move || format!("text-lg font-semibold {}", cash_class())>
+                            {move || view! { <Num value=after_tax_cash() signed=true /> }}
+                        </p>
                     </div>
                     <button
                         class="text-xs text-gray-500 hover:text-blue-400 border border-border rounded px-2 py-1 transition-colors"
@@ -1120,34 +1188,44 @@ fn ScenarioCard(
                             <p class="text-gray-500 mb-1">"Realized gains"</p>
                             <p class="text-yellow-300">"ST: " {fmt_cash(total_st)}</p>
                             <p class="text-blue-300">"LT: " {fmt_cash(total_lt)}</p>
-                            <p class="text-orange-300 mt-1">
+                            <div class="mt-2 space-y-0.5">
                                 {move || {
                                     if tax_failed.get() {
                                         view! {
-                                            <span>
-                                                {format!("Est. federal tax ({tax_year}): — ")}
+                                            <p class="text-orange-300">
+                                                {format!("Tax ({tax_year}): — ")}
                                                 <a href="/tax" class="underline text-gray-400">"set up Taxes"</a>
-                                            </span>
+                                            </p>
                                         }.into_any()
-                                    } else if let Some(t) = tax.get() {
+                                    } else if let Some(bt) = baseline_tax.get() {
+                                        let delta = tax.get().unwrap_or(0.0);
+                                        let impact_str = if delta.abs() < 1.0 {
+                                            "no tax impact".to_string()
+                                        } else if delta > 0.0 {
+                                            format!("costs {} in tax", fmt_cash(delta))
+                                        } else {
+                                            format!("saves {} in tax", fmt_cash(-delta))
+                                        };
                                         view! {
-                                            <span>{format!("Est. federal tax ({tax_year}): {}", fmt_cash(-t))}</span>
+                                            <p class="text-gray-400">
+                                                {format!("Base tax ({tax_year}): {}", fmt_cash(bt))}
+                                            </p>
+                                            <p class=move || if delta <= 0.0 { "text-green-400" } else { "text-orange-300" }>
+                                                {format!("Scenario: {}", impact_str)}
+                                            </p>
                                         }.into_any()
                                     } else {
                                         view! {
-                                            <span>{format!("Est. federal tax ({tax_year}): computing…")}</span>
+                                            <p class="text-gray-500">"Tax: computing…"</p>
                                         }.into_any()
                                     }
                                 }}
-                            </p>
+                            </div>
                         </div>
                         <div class="text-right">
-                            <p class="text-gray-500 mb-1">"After-tax net cash"</p>
-                            <p class=move || {
-                                let after = net_cash - tax.get().unwrap_or(0.0);
-                                format!("text-xl font-semibold {}", if after >= 0.0 { "text-green-300" } else { "text-red-300" })
-                            }>
-                                {move || view! { <Num value={net_cash - tax.get().unwrap_or(0.0)} signed=true /> }}
+                            <p class="text-gray-500 mb-1">"Pre-tax cash"</p>
+                            <p class=format!("text-xl font-semibold {}", if net_cash >= 0.0 { "text-green-300" } else { "text-red-300" })>
+                                <Num value=net_cash signed=true />
                             </p>
                         </div>
                     </div>
