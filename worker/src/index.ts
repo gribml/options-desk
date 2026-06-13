@@ -633,10 +633,18 @@ async function handleTax(
   const baseline = revisions[revisions.length - 1];
 
   if (Array.isArray(body.items)) {
-    const results = body.items.map((it: { id: string; st_gain: number; lt_gain: number }) => ({
-      id: it.id,
-      tax: marginalTradeTax(baseline, { st_gain: it.st_gain ?? 0, lt_gain: it.lt_gain ?? 0 }, taxYear),
-    }));
+    for (const it of body.items) {
+      const st = Number(it?.st_gain ?? 0);
+      const lt = Number(it?.lt_gain ?? 0);
+      if (typeof it?.id !== 'string' || !Number.isFinite(st) || !Number.isFinite(lt)) {
+        return jsonResp({ error: 'items must include id, st_gain, lt_gain (numbers)' }, 400);
+      }
+    }
+    const results = body.items.map((it: { id: string; st_gain: number; lt_gain: number }) => {
+      const st = Number(it.st_gain ?? 0);
+      const lt = Number(it.lt_gain ?? 0);
+      return { id: it.id, tax: marginalTradeTax(baseline, { st_gain: st, lt_gain: lt }, taxYear) };
+    });
     return jsonResp({ results });
   }
 
