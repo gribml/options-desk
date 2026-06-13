@@ -640,9 +640,15 @@ async function handleTax(
     return jsonResp({ results });
   }
 
+  const stGain = Number(body?.st_gain ?? 0);
+  const ltGain = Number(body?.lt_gain ?? 0);
+  if (!Number.isFinite(stGain) || !Number.isFinite(ltGain)) {
+    return jsonResp({ error: 'st_gain and lt_gain must be numbers' }, 400);
+  }
+
   const tax = marginalTradeTax(
     baseline,
-    { st_gain: body.st_gain ?? 0, lt_gain: body.lt_gain ?? 0 },
+    { st_gain: stGain, lt_gain: ltGain },
     taxYear,
   );
   const baseline_tax = computeFederalTax(baseline, taxYear);
