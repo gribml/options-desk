@@ -38,21 +38,31 @@ interface Env {
   ALPACA_KEY: string;
   ALPACA_SECRET: string;
   DB: D1Database;
+  ALLOWED_ORIGIN: string; // e.g. https://options-desk.pages.dev
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const CORS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
+function corsHeaders(origin: string): Record<string, string> {
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  };
+}
 
+// Plain JSON — CORS is added by the entry point after origin validation.
 function jsonResp(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...CORS, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
   });
+}
+
+function withCors(response: Response, cors: Record<string, string>): Response {
+  const headers = new Headers(response.headers);
+  for (const [k, v] of Object.entries(cors)) headers.set(k, v);
+  return new Response(response.body, { status: response.status, headers });
 }
 
 function supabaseBase(env: Env): string {
@@ -536,8 +546,10 @@ function nettCapitalGains(inp: TaxInputs): {
     netSt -= use;
   }
 
+  // IRC §1211(b): MFS cap is $1,500; all other statuses cap at $3,000.
+  const lossDeductionCap = inp.filing_status === 'mfs' ? 1_500 : 3_000;
   const totalNet = netSt + netLt;
-  const ordinaryLossDeduction = totalNet < 0 ? Math.min(3000, -totalNet) : 0;
+  const ordinaryLossDeduction = totalNet < 0 ? Math.min(lossDeductionCap, -totalNet) : 0;
 
   return {
     ordinaryStComponent: Math.max(0, netSt),
@@ -551,7 +563,8 @@ function computeFederalTax(inp: TaxInputs, year: number): number {
   const fs = inp.filing_status;
   const cap = nettCapitalGains(inp);
 
-  const nonQualDiv = Math.max(0, inp.ordinary_dividends - inp.qualified_dividends);
+  const qualDiv = Math.min(inp.qualified_dividends, inp.ordinary_dividends);
+  const nonQualDiv = Math.max(0, inp.ordinary_dividends - qualDiv);
   const ordinaryIncome = Math.max(
     0,
     inp.w2_income + inp.interest_income + nonQualDiv + cap.ordinaryStComponent +
@@ -565,7 +578,7 @@ function computeFederalTax(inp: TaxInputs, year: number): number {
   // Deduction applies to ordinary income first; any excess reduces the LT stack.
   const ordinaryTaxable = Math.max(0, ordinaryIncome - deduction);
   const remainingDeduction = Math.max(0, deduction - ordinaryIncome);
-  const ltStack = cap.ltComponent + inp.qualified_dividends;
+  const ltStack = cap.ltComponent + qualDiv;
   const ltTaxable = Math.max(0, ltStack - remainingDeduction);
 
   const ordinaryTax = progressiveTax(ordinaryTaxable, c.ordinary[fs]);
@@ -587,18 +600,19 @@ function marginalTradeTax(
   baseline: TaxInputs,
   gains: { st_gain: number; lt_gain: number },
   year: number,
+  baselineTax: number,
 ): number {
   const withTrade: TaxInputs = {
     ...baseline,
     st_capital_gains: baseline.st_capital_gains + gains.st_gain,
     lt_capital_gains: baseline.lt_capital_gains + gains.lt_gain,
   };
-  return computeFederalTax(withTrade, year) - computeFederalTax(baseline, year);
+  return computeFederalTax(withTrade, year) - baselineTax;
 }
 
 // POST /tax — compute marginal federal tax for a trade (or batch of positions)
 // against the authenticated user's stored income profile for the given year.
-//   single: { tax_year, st_gain, lt_gain }            → { tax }
+//   single: { tax_year, st_gain, lt_gain }            → { tax, baseline_tax }
 //   batch:  { tax_year, items: [{ id, st_gain, lt_gain }] } → { results: [{ id, tax }] }
 async function handleTax(
   request: Request,
@@ -615,6 +629,7 @@ async function handleTax(
 
   const taxYear = Number(body?.tax_year);
   if (!Number.isFinite(taxYear)) return jsonResp({ error: 'tax_year required' }, 400);
+  if (!Number.isInteger(taxYear)) return jsonResp({ error: 'tax year must be an integer' }, 400);
 
   // Read the user's profile for this year (RLS-scoped via the user's own JWT).
   const profileUrl =
@@ -633,6 +648,7 @@ async function handleTax(
   const baseline = revisions[revisions.length - 1];
 
   if (Array.isArray(body.items)) {
+    const baselineTax = computeFederalTax(baseline, taxYear);
     for (const it of body.items) {
       const st = Number(it?.st_gain ?? 0);
       const lt = Number(it?.lt_gain ?? 0);
@@ -643,7 +659,7 @@ async function handleTax(
     const results = body.items.map((it: { id: string; st_gain: number; lt_gain: number }) => {
       const st = Number(it.st_gain ?? 0);
       const lt = Number(it.lt_gain ?? 0);
-      return { id: it.id, tax: marginalTradeTax(baseline, { st_gain: st, lt_gain: lt }, taxYear) };
+      return { id: it.id, tax: marginalTradeTax(baseline, { st_gain: st, lt_gain: lt }, taxYear, baselineTax) };
     });
     return jsonResp({ results });
   }
@@ -667,56 +683,48 @@ async function handleTax(
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    try {
-      if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
+    const origin = request.headers.get('Origin') ?? '';
+    const cors = corsHeaders(env.ALLOWED_ORIGIN);
 
+    if (request.method === 'OPTIONS') {
+      if (!env.ALLOWED_ORIGIN || origin !== env.ALLOWED_ORIGIN) return new Response(null, { status: 403 });
+      return new Response(null, { headers: cors });
+    }
+
+    // Reject requests from any origin other than the configured app origin.
+    if (!env.ALLOWED_ORIGIN || origin !== env.ALLOWED_ORIGIN) {
+      return jsonResp({ error: 'Forbidden' }, 403);
+    }
+
+    try {
       const user = await verifyToken(request, env);
-      if (!user) return jsonResp({ error: 'Unauthorized' }, 401);
+      if (!user) return withCors(jsonResp({ error: 'Unauthorized' }, 401), cors);
       const authHeader = request.headers.get('Authorization')!;
 
       const url = new URL(request.url);
 
-      if (url.pathname === '/quote' && request.method === 'GET') {
-        const symbol = url.searchParams.get('symbol')?.toUpperCase();
-        if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
-        return await handleQuote(symbol, env);
-      }
+      const response = await (async (): Promise<Response> => {
+        if (url.pathname === '/quote' && request.method === 'GET') {
+          const symbol = url.searchParams.get('symbol')?.toUpperCase();
+          if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
+          return handleQuote(symbol, env);
+        }
 
-      if (url.pathname === '/option-quote' && request.method === 'GET') {
-        return await handleOptionQuote(url, env);
-      }
+        if (url.pathname === '/option-quote' && request.method === 'GET') return handleOptionQuote(url, env);
+        if (url.pathname === '/option-chain' && request.method === 'GET') return handleOptionChain(url, env);
+        if (url.pathname === '/option-meta' && request.method === 'GET') return handleOptionMeta(url, env);
+        if (url.pathname === '/close-prices' && request.method === 'GET') return handleClosePrices(url, env);
+        if (url.pathname === '/forward-vol' && request.method === 'GET') return handleForwardVol(url, env);
+        if (url.pathname === '/term-rates' && request.method === 'GET') return handleTermRates(url, env);
+        if (url.pathname === '/latest-bar' && request.method === 'GET') return handleLatestBar(url, env);
+        if (url.pathname === '/tax' && request.method === 'POST') return handleTax(request, user, authHeader, env);
 
-      if (url.pathname === '/option-chain' && request.method === 'GET') {
-        return await handleOptionChain(url, env);
-      }
+        return jsonResp({ error: 'Not found' }, 404);
+      })();
 
-      if (url.pathname === '/option-meta' && request.method === 'GET') {
-        return await handleOptionMeta(url, env);
-      }
-
-      if (url.pathname === '/close-prices' && request.method === 'GET') {
-        return await handleClosePrices(url, env);
-      }
-
-      if (url.pathname === '/forward-vol' && request.method === 'GET') {
-        return await handleForwardVol(url, env);
-      }
-
-      if (url.pathname === '/term-rates' && request.method === 'GET') {
-        return await handleTermRates(url, env);
-      }
-
-      if (url.pathname === '/latest-bar' && request.method === 'GET') {
-        return await handleLatestBar(url, env);
-      }
-
-      if (url.pathname === '/tax' && request.method === 'POST') {
-        return await handleTax(request, user, authHeader, env);
-      }
-
-      return jsonResp({ error: 'Not found' }, 404);
+      return withCors(response, cors);
     } catch (e) {
-      return jsonResp({ error: e instanceof Error ? e.message : 'Internal error' }, 500);
+      return withCors(jsonResp({ error: e instanceof Error ? e.message : 'Internal error' }, 500), cors);
     }
   },
 } satisfies ExportedHandler<Env>;

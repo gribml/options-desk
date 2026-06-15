@@ -134,7 +134,7 @@ fn YearSection(
     let deduction_choice = RwSignal::new(initial_seed.deduction_choice);
     let w2 = RwSignal::new(money_str(initial_seed.w2_income));
     let interest = RwSignal::new(money_str(initial_seed.interest_income));
-    let ord_div = RwSignal::new(money_str(initial_seed.ordinary_dividends));
+    let non_qual_div = RwSignal::new(money_str((initial_seed.ordinary_dividends - initial_seed.qualified_dividends).max(0.0)));
     let qual_div = RwSignal::new(money_str(initial_seed.qualified_dividends));
     let st_gains = RwSignal::new(money_str(initial_seed.st_capital_gains));
     let lt_gains = RwSignal::new(money_str(initial_seed.lt_capital_gains));
@@ -158,8 +158,8 @@ fn YearSection(
             || deduction_choice.get() != s.deduction_choice
             || (parse_f(&w2.get())       - s.w2_income).abs()            > 0.005
             || (parse_f(&interest.get()) - s.interest_income).abs()      > 0.005
-            || (parse_f(&ord_div.get())  - s.ordinary_dividends).abs()   > 0.005
-            || (parse_f(&qual_div.get()) - s.qualified_dividends).abs()  > 0.005
+            || (parse_f(&non_qual_div.get()) - (s.ordinary_dividends - s.qualified_dividends).max(0.0)).abs() > 0.005
+            || (parse_f(&qual_div.get())     - s.qualified_dividends).abs() > 0.005
             || (parse_f(&st_gains.get()) - s.st_capital_gains).abs()     > 0.005
             || (parse_f(&lt_gains.get()) - s.lt_capital_gains).abs()     > 0.005
             || (parse_f(&rental.get())   - s.rental_income).abs()        > 0.005
@@ -173,7 +173,7 @@ fn YearSection(
         deduction_choice.set(cur.deduction_choice);
         w2.set(money_str(cur.w2_income));
         interest.set(money_str(cur.interest_income));
-        ord_div.set(money_str(cur.ordinary_dividends));
+        non_qual_div.set(money_str((cur.ordinary_dividends - cur.qualified_dividends).max(0.0)));
         qual_div.set(money_str(cur.qualified_dividends));
         st_gains.set(money_str(cur.st_capital_gains));
         lt_gains.set(money_str(cur.lt_capital_gains));
@@ -209,13 +209,15 @@ fn YearSection(
             };
 
             let rev = (|| -> Result<TaxRevision, String> {
+                let qual = parse(qual_div, "Qual dividends")?;
+                let non_qual = parse(non_qual_div, "Non-qual dividends")?;
                 Ok(TaxRevision {
                     entered_at: Utc::now(),
                     filing_status: filing_status.get(),
                     w2_income: parse(w2, "W-2 income")?,
                     interest_income: parse(interest, "Interest")?,
-                    ordinary_dividends: parse(ord_div, "Ordinary dividends")?,
-                    qualified_dividends: parse(qual_div, "Qualified dividends")?,
+                    ordinary_dividends: non_qual + qual,
+                    qualified_dividends: qual,
                     st_capital_gains: parse(st_gains, "Short-term gains")?,
                     lt_capital_gains: parse(lt_gains, "Long-term gains")?,
                     rental_income: parse(rental, "Rental income")?,
@@ -294,8 +296,8 @@ fn YearSection(
                         </div>
                         <MoneyField label="W-2 income" signal=w2 />
                         <MoneyField label="Interest income" signal=interest />
-                        <MoneyField label="Ordinary dividends" signal=ord_div />
-                        <MoneyField label="Qualified dividends" signal=qual_div />
+                        <MoneyField label="Non-qual dividends" signal=non_qual_div />
+                        <MoneyField label="Qual dividends" signal=qual_div />
                         <MoneyField label="Rental income" signal=rental />
                         <MoneyField label="Short-term gains" signal=st_gains />
                         <MoneyField label="Long-term gains" signal=lt_gains />
@@ -320,7 +322,7 @@ fn YearSection(
                     </div>
 
                     <p class="text-xs text-gray-500">
-                        "Qualified dividends are a subset of ordinary dividends (taxed at long-term rates). Carryforward losses are entered as positive numbers."
+                        "Non-qual dividends are taxed at ordinary rates; qual dividends at long-term rates. Enter each independently. Carryforward losses are entered as positive numbers."
                     </p>
 
                     {move || err.get().map(|e| view! { <p class="text-sm text-red-400">{e}</p> })}
@@ -437,8 +439,8 @@ fn revision_diff(older: &TaxRevision, newer: &TaxRevision) -> Vec<String> {
     let money_fields: &[(&str, f64, f64)] = &[
         ("W-2",              older.w2_income,            newer.w2_income),
         ("Interest",         older.interest_income,      newer.interest_income),
-        ("Ord. dividends",   older.ordinary_dividends,   newer.ordinary_dividends),
-        ("Qual. dividends",  older.qualified_dividends,  newer.qualified_dividends),
+        ("Non-qual div.",    older.ordinary_dividends - older.qualified_dividends, newer.ordinary_dividends - newer.qualified_dividends),
+        ("Qual div.",        older.qualified_dividends,  newer.qualified_dividends),
         ("ST gains",         older.st_capital_gains,     newer.st_capital_gains),
         ("LT gains",         older.lt_capital_gains,     newer.lt_capital_gains),
         ("Rental",           older.rental_income,        newer.rental_income),
