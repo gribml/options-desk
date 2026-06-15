@@ -77,7 +77,7 @@ impl DeductionChoice {
 /// deserializes directly. `qualified_dividends` is a subset of
 /// `ordinary_dividends`; carryforward losses are positive numbers (a $5,000 loss
 /// carried in is `5000.0`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaxRevision {
     pub entered_at: DateTime<Utc>,
     pub filing_status: FilingStatus,

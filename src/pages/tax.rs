@@ -128,39 +128,44 @@ fn YearSection(
     let profile_id = RwSignal::new(existing.as_ref().map(|p| p.id));
     let revisions = RwSignal::new(existing.as_ref().map(|p| p.revisions.clone()).unwrap_or_default());
 
-    let seed = existing.as_ref().and_then(|p| p.current().cloned()).unwrap_or_default();
+    let initial_seed = existing.as_ref().and_then(|p| p.current().cloned()).unwrap_or_default();
 
-    let filing_status = RwSignal::new(seed.filing_status);
-    let deduction_choice = RwSignal::new(seed.deduction_choice);
-    let w2 = RwSignal::new(money_str(seed.w2_income));
-    let interest = RwSignal::new(money_str(seed.interest_income));
-    let ord_div = RwSignal::new(money_str(seed.ordinary_dividends));
-    let qual_div = RwSignal::new(money_str(seed.qualified_dividends));
-    let st_gains = RwSignal::new(money_str(seed.st_capital_gains));
-    let lt_gains = RwSignal::new(money_str(seed.lt_capital_gains));
-    let rental = RwSignal::new(money_str(seed.rental_income));
-    let itemized = RwSignal::new(money_str(seed.itemized_deductions));
-    let cf_st = RwSignal::new(money_str(seed.carryforward_st_loss));
-    let cf_lt = RwSignal::new(money_str(seed.carryforward_lt_loss));
+    let filing_status = RwSignal::new(initial_seed.filing_status);
+    let deduction_choice = RwSignal::new(initial_seed.deduction_choice);
+    let w2 = RwSignal::new(money_str(initial_seed.w2_income));
+    let interest = RwSignal::new(money_str(initial_seed.interest_income));
+    let ord_div = RwSignal::new(money_str(initial_seed.ordinary_dividends));
+    let qual_div = RwSignal::new(money_str(initial_seed.qualified_dividends));
+    let st_gains = RwSignal::new(money_str(initial_seed.st_capital_gains));
+    let lt_gains = RwSignal::new(money_str(initial_seed.lt_capital_gains));
+    let rental = RwSignal::new(money_str(initial_seed.rental_income));
+    let itemized = RwSignal::new(money_str(initial_seed.itemized_deductions));
+    let cf_st = RwSignal::new(money_str(initial_seed.carryforward_st_loss));
+    let cf_lt = RwSignal::new(money_str(initial_seed.carryforward_lt_loss));
 
     let err = RwSignal::new(Option::<String>::None);
     let saving = RwSignal::new(false);
 
+    // Derives the latest persisted revision from `revisions` so is_dirty always
+    // compares against what's actually saved, not the snapshot from component creation.
+    let seed = Memo::new(move |_| revisions.get().last().cloned().unwrap_or_default());
+
     // True when any form field differs from the last saved revision.
     let is_dirty = Memo::new(move |_| {
+        let s = seed.get();
         let parse_f = |s: &str| -> f64 { s.trim().parse().unwrap_or(0.0) };
-        filing_status.get() != seed.filing_status
-            || deduction_choice.get() != seed.deduction_choice
-            || (parse_f(&w2.get())       - seed.w2_income).abs()            > 0.005
-            || (parse_f(&interest.get()) - seed.interest_income).abs()      > 0.005
-            || (parse_f(&ord_div.get())  - seed.ordinary_dividends).abs()   > 0.005
-            || (parse_f(&qual_div.get()) - seed.qualified_dividends).abs()  > 0.005
-            || (parse_f(&st_gains.get()) - seed.st_capital_gains).abs()     > 0.005
-            || (parse_f(&lt_gains.get()) - seed.lt_capital_gains).abs()     > 0.005
-            || (parse_f(&rental.get())   - seed.rental_income).abs()        > 0.005
-            || (parse_f(&itemized.get()) - seed.itemized_deductions).abs()  > 0.005
-            || (parse_f(&cf_st.get())    - seed.carryforward_st_loss).abs() > 0.005
-            || (parse_f(&cf_lt.get())    - seed.carryforward_lt_loss).abs() > 0.005
+        filing_status.get() != s.filing_status
+            || deduction_choice.get() != s.deduction_choice
+            || (parse_f(&w2.get())       - s.w2_income).abs()            > 0.005
+            || (parse_f(&interest.get()) - s.interest_income).abs()      > 0.005
+            || (parse_f(&ord_div.get())  - s.ordinary_dividends).abs()   > 0.005
+            || (parse_f(&qual_div.get()) - s.qualified_dividends).abs()  > 0.005
+            || (parse_f(&st_gains.get()) - s.st_capital_gains).abs()     > 0.005
+            || (parse_f(&lt_gains.get()) - s.lt_capital_gains).abs()     > 0.005
+            || (parse_f(&rental.get())   - s.rental_income).abs()        > 0.005
+            || (parse_f(&itemized.get()) - s.itemized_deductions).abs()  > 0.005
+            || (parse_f(&cf_st.get())    - s.carryforward_st_loss).abs() > 0.005
+            || (parse_f(&cf_lt.get())    - s.carryforward_lt_loss).abs() > 0.005
     });
 
     let apply_revision_to_form = move |cur: TaxRevision| {
