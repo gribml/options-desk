@@ -1060,12 +1060,16 @@ fn ScenarioCard(
     Effect::new(move |_| {
         let tok = match auth.token.get() { Some(t) => t, None => return };
         tax_failed.set(false);
-        if total_st.abs() < 1e-9 && total_lt.abs() < 1e-9 {
-            tax.set(Some(0.0));
-            return;
-        }
+
+        // Still fetch baseline_tax even when gains are zero.
+        let (st, lt) = if total_st.abs() < 1e-9 && total_lt.abs() < 1e-9 {
+            (0.0, 0.0)
+        } else {
+            (total_st, total_lt)
+        };
+
         spawn_local(async move {
-            match market::estimate_trade_tax(&tok, tax_year, total_st, total_lt).await {
+            match market::estimate_trade_tax(&tok, tax_year, st, lt).await {
                 Ok(r) => { tax.set(Some(r.tax)); baseline_tax.set(Some(r.baseline_tax)); }
                 Err(_) => { tax.set(None); baseline_tax.set(None); tax_failed.set(true); }
             }
