@@ -38,7 +38,8 @@ interface Env {
   ALPACA_KEY: string;
   ALPACA_SECRET: string;
   DB: D1Database;
-  ALLOWED_ORIGIN: string; // e.g. https://options-desk.pages.dev
+  ALLOWED_ORIGIN: string;  // production Pages URL — set via `wrangler secret put`
+  DEV_ORIGIN?: string;     // optional extra origin — set as a [vars] in wrangler.local.toml
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -647,8 +648,8 @@ async function handleTax(
   }
   const baseline = revisions[revisions.length - 1];
 
+  const baselineTax = computeFederalTax(baseline, taxYear);
   if (Array.isArray(body.items)) {
-    const baselineTax = computeFederalTax(baseline, taxYear);
     for (const it of body.items) {
       const st = Number(it?.st_gain ?? 0);
       const lt = Number(it?.lt_gain ?? 0);
@@ -674,9 +675,9 @@ async function handleTax(
     baseline,
     { st_gain: stGain, lt_gain: ltGain },
     taxYear,
+    computeFederalTax(baseline, taxYear),
   );
-  const baseline_tax = computeFederalTax(baseline, taxYear);
-  return jsonResp({ tax, baseline_tax });
+  return jsonResp({ tax, baseline_tax: baselineTax });
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -684,15 +685,16 @@ async function handleTax(
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const origin = request.headers.get('Origin') ?? '';
-    const cors = corsHeaders(env.ALLOWED_ORIGIN);
+    const allowed = [env.ALLOWED_ORIGIN, env.DEV_ORIGIN].filter(Boolean) as string[];
+    const originOk = allowed.length > 0 && allowed.includes(origin);
+    const cors = corsHeaders(origin);
 
     if (request.method === 'OPTIONS') {
-      if (!env.ALLOWED_ORIGIN || origin !== env.ALLOWED_ORIGIN) return new Response(null, { status: 403 });
+      if (!originOk) return new Response(null, { status: 403 });
       return new Response(null, { headers: cors });
     }
 
-    // Reject requests from any origin other than the configured app origin.
-    if (!env.ALLOWED_ORIGIN || origin !== env.ALLOWED_ORIGIN) {
+    if (!originOk) {
       return jsonResp({ error: 'Forbidden' }, 403);
     }
 

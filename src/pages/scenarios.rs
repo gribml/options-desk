@@ -14,13 +14,28 @@ use crate::models::{
     option::{OptionSpec, OptionType},
     position::Position,
     scenario::{
-        AssignmentEvent, Scenario, ScenarioGreeks, ScenarioMarketInput, ScenarioResult,
-        ScenarioTrade, TradeDirection, TradeResult,
+        AssignmentEvent, CoverageSummary, Scenario, ScenarioGreeks, ScenarioMarketInput,
+        ScenarioResult, ScenarioTrade, TradeDirection, TradeResult,
     },
 };
 use crate::pricing::black_scholes::BsInputs;
 
 // ── Evaluation ────────────────────────────────────────────────────────────────
+
+/// Allocates `shares` against short call tiers (lowest strike first) and returns
+/// the total capped upside: Σ min(remaining_shares, tier_shares) × strike.
+fn covered_upside(shares: i32, mut call_tiers: Vec<(f64, i32)>) -> f64 {
+    call_tiers.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut remaining = shares;
+    let mut upside = 0.0f64;
+    for (strike, contracts) in call_tiers {
+        if remaining <= 0 { break; }
+        let assigned = remaining.min(contracts * 100);
+        upside += assigned as f64 * strike;
+        remaining -= assigned;
+    }
+    upside
+}
 
 fn evaluate(scenario: &Scenario, positions: &[Position]) -> ScenarioResult {
     let eval_date = scenario.evaluation_date;
@@ -52,19 +67,38 @@ fn evaluate(scenario: &Scenario, positions: &[Position]) -> ScenarioResult {
         };
         if intrinsic <= 0.0 { continue; }
         let contracts = pos.quantity.unsigned_abs();
-        let option_pnl = (pos.cost_basis - intrinsic) * contracts as f64 * 100.0;
         let stock_cf = match spec.option_type {
             OptionType::Call =>  spec.strike * contracts as f64 * 100.0,
             OptionType::Put  => -spec.strike * contracts as f64 * 100.0,
         };
-        let lt = (eval_date - pos.opened_at.date_naive()).num_days() > 365;
+
+        // For a covered call, IRS requires the premium received to be folded into
+        // the stock sale proceeds: gain = (strike + premium) − stock_basis.
+        // For everything else (naked, puts) fall back to option-only P&L.
+        let underlying = positions.iter().find(|p| {
+            p.option_spec.is_none() && p.symbol == pos.symbol && p.quantity > 0
+        });
+        let (realized_gain, lt) = match (spec.option_type, underlying) {
+            (OptionType::Call, Some(stock)) => {
+                let adjusted_basis = stock.cost_basis - pos.cost_basis;
+                let gain = (spec.strike - adjusted_basis) * contracts as f64 * 100.0;
+                let lt = (eval_date - stock.opened_at.date_naive()).num_days() > 365;
+                (gain, lt)
+            }
+            _ => {
+                let gain = (pos.cost_basis - intrinsic) * contracts as f64 * 100.0;
+                let lt = (eval_date - pos.opened_at.date_naive()).num_days() > 365;
+                (gain, lt)
+            }
+        };
+
         net_cash += stock_cf;
-        if lt { lt_gain += option_pnl; } else { st_gain += option_pnl; }
+        if lt { lt_gain += realized_gain; } else { st_gain += realized_gain; }
         assignments.push(AssignmentEvent {
             description: format!("Assignment: {} short {} ${:.0} {} ×{}",
                 pos.symbol, spec.option_type.label(), spec.strike,
                 spec.expiry.format("%d-%b-%y"), contracts),
-            option_pnl, is_long_term: lt, stock_cash_flow: stock_cf,
+            realized_gain, is_long_term: lt, stock_cash_flow: stock_cf,
             option_type: spec.option_type, strike: spec.strike, contracts,
         });
     }
@@ -137,10 +171,123 @@ fn evaluate(scenario: &Scenario, positions: &[Position]) -> ScenarioResult {
         }
     }
 
+    // ── Per-symbol coverage analysis ─────────────────────────────────────────
+    let mut coverage: Vec<CoverageSummary> = vec![];
+    let mut stock_syms: Vec<&str> = positions.iter()
+        .filter(|p| p.option_spec.is_none() && p.quantity > 0)
+        .map(|p| p.symbol.as_str())
+        .collect();
+    stock_syms.sort_unstable();
+    stock_syms.dedup();
+
+    for sym in stock_syms {
+        let net_shares: i32 = positions.iter()
+            .filter(|p| p.option_spec.is_none() && p.symbol == sym && p.quantity > 0)
+            .map(|p| p.quantity)
+            .sum::<i32>()
+            + scenario.trades.iter()
+                .filter(|t| t.option_spec.is_none() && t.symbol == sym)
+                .map(|t| match t.direction {
+                    TradeDirection::Buy  =>  t.contracts as i32,
+                    TradeDirection::Sell => -(t.contracts as i32),
+                })
+                .sum::<i32>();
+
+        let portfolio_short_calls: i32 = positions.iter()
+            .filter(|p| p.symbol == sym && p.quantity < 0
+                && p.option_spec.as_ref().map(|s| s.option_type == OptionType::Call).unwrap_or(false))
+            .map(|p| (-p.quantity) as i32)
+            .sum();
+
+        let calls_closed: i32 = scenario.trades.iter()
+            .filter(|t| t.symbol == sym)
+            .filter(|t| {
+                t.closes_position_id
+                    .and_then(|pid| positions.iter().find(|p| p.id == pid))
+                    .and_then(|p| p.option_spec.as_ref())
+                    .map(|s| s.option_type == OptionType::Call)
+                    .unwrap_or(false)
+            })
+            .map(|t| t.contracts as i32)
+            .sum();
+
+        let new_short_calls: i32 = scenario.trades.iter()
+            .filter(|t| t.symbol == sym && t.closes_position_id.is_none()
+                && t.direction == TradeDirection::Sell
+                && t.option_spec.as_ref().map(|s| s.option_type == OptionType::Call).unwrap_or(false))
+            .map(|t| t.contracts as i32)
+            .sum();
+
+        let net_short_call_contracts = portfolio_short_calls - calls_closed + new_short_calls;
+
+        // Build per-strike call tiers for the portfolio (before scenario).
+        let before_calls: Vec<(f64, i32)> = {
+            let mut tiers: Vec<(f64, i32)> = vec![];
+            for p in positions.iter().filter(|p| p.symbol == sym && p.quantity < 0) {
+                if let Some(s) = p.option_spec.as_ref() {
+                    if s.option_type == OptionType::Call {
+                        if let Some(e) = tiers.iter_mut().find(|(k, _)| (*k - s.strike).abs() < 0.001) {
+                            e.1 += (-p.quantity) as i32;
+                        } else {
+                            tiers.push((s.strike, (-p.quantity) as i32));
+                        }
+                    }
+                }
+            }
+            tiers
+        };
+
+        // Build after-scenario tiers: start from before, subtract closed, add new.
+        let after_calls: Vec<(f64, i32)> = {
+            let mut tiers = before_calls.clone();
+            // Remove contracts closed by the scenario.
+            for t in scenario.trades.iter().filter(|t| t.symbol == sym) {
+                if let Some(pid) = t.closes_position_id {
+                    if let Some(pos) = positions.iter().find(|p| p.id == pid) {
+                        if let Some(s) = pos.option_spec.as_ref() {
+                            if s.option_type == OptionType::Call && pos.quantity < 0 {
+                                if let Some(e) = tiers.iter_mut().find(|(k, _)| (*k - s.strike).abs() < 0.001) {
+                                    e.1 -= t.contracts as i32;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Add new short calls opened by the scenario.
+            for t in scenario.trades.iter()
+                .filter(|t| t.symbol == sym && t.closes_position_id.is_none() && t.direction == TradeDirection::Sell)
+            {
+                if let Some(s) = t.option_spec.as_ref() {
+                    if s.option_type == OptionType::Call {
+                        if let Some(e) = tiers.iter_mut().find(|(k, _)| (*k - s.strike).abs() < 0.001) {
+                            e.1 += t.contracts as i32;
+                        } else {
+                            tiers.push((s.strike, t.contracts as i32));
+                        }
+                    }
+                }
+            }
+            tiers.retain(|(_, n)| *n > 0);
+            tiers
+        };
+
+        // Portfolio shares before any scenario stock trades (for upside_before).
+        let portfolio_shares: i32 = positions.iter()
+            .filter(|p| p.option_spec.is_none() && p.symbol == sym && p.quantity > 0)
+            .map(|p| p.quantity)
+            .sum();
+
+        let upside_before = covered_upside(portfolio_shares, before_calls);
+        let upside_after  = covered_upside(net_shares, after_calls);
+
+        coverage.push(CoverageSummary { symbol: sym.to_string(), net_shares, net_short_call_contracts, upside_before, upside_after });
+    }
+
     // Tax is no longer subtracted here — it's computed per-card by the Worker
     // against the user's income profile. `net_cash` is pre-tax.
     ScenarioResult { evaluated_at: Utc::now(), trade_results, assignments, net_cash,
-        total_st_gain: st_gain, total_lt_gain: lt_gain, greeks }
+        total_st_gain: st_gain, total_lt_gain: lt_gain, greeks, coverage }
 }
 
 // ── B-S price helper ──────────────────────────────────────────────────────────
@@ -1035,7 +1182,7 @@ fn ScenarioCard(
 
     let tax = RwSignal::new(Option::<f64>::None);
     let baseline_tax = RwSignal::new(Option::<f64>::None);
-    let tax_failed = RwSignal::new(false);
+    let tax_err = RwSignal::new(Option::<String>::None);
     let tax_year = scenario.evaluation_date.year();
 
     let cash_class;
@@ -1047,6 +1194,7 @@ fn ScenarioCard(
     let market_inputs = scenario.market_inputs.clone();
     let trade_results = result.trade_results.clone();
     let assignments   = result.assignments.clone();
+    let coverage      = result.coverage.clone();
     let greeks        = result.greeks;
     let net_cash      = result.net_cash;
     let total_st      = result.total_st_gain;
@@ -1059,7 +1207,7 @@ fn ScenarioCard(
     // Worker against the user's profile for the scenario's tax year.
     Effect::new(move |_| {
         let tok = match auth.token.get() { Some(t) => t, None => return };
-        tax_failed.set(false);
+        tax_err.set(None);
 
         // Still fetch baseline_tax even when gains are zero.
         let (st, lt) = if total_st.abs() < 1e-9 && total_lt.abs() < 1e-9 {
@@ -1071,7 +1219,7 @@ fn ScenarioCard(
         spawn_local(async move {
             match market::estimate_trade_tax(&tok, tax_year, st, lt).await {
                 Ok(r) => { tax.set(Some(r.tax)); baseline_tax.set(Some(r.baseline_tax)); }
-                Err(_) => { tax.set(None); baseline_tax.set(None); tax_failed.set(true); }
+                Err(e) => { tax.set(None); baseline_tax.set(None); tax_err.set(Some(e)); }
             }
         });
     });
@@ -1178,11 +1326,65 @@ fn ScenarioCard(
                                         <p class={if a.stock_cash_flow >= 0.0 { "text-green-400" } else { "text-red-400" }}>
                                             {fmt_cash(a.stock_cash_flow)} " stock cash"
                                         </p>
-                                        <p class={if a.option_pnl >= 0.0 { "text-green-300" } else { "text-red-300" }}>
-                                            {fmt_cash(a.option_pnl)} " option P&L (" {if a.is_long_term { "LT" } else { "ST" }} ")"
+                                        <p class={if a.realized_gain >= 0.0 { "text-green-300" } else { "text-red-300" }}>
+                                            {fmt_cash(a.realized_gain)} " gain (" {if a.is_long_term { "LT" } else { "ST" }} ")"
                                         </p>
                                     </div>
                                 </div>
+                            }).collect_view()}
+                        </div>
+                    })}
+
+                    {(!coverage.is_empty()).then(|| view! {
+                        <div class="space-y-1">
+                            <p class="text-xs text-gray-500 uppercase tracking-wider">"Position coverage"</p>
+                            {coverage.iter().map(|c| {
+                                let uncovered      = c.uncovered_shares();
+                                let excess         = c.excess_short_delta();
+                                let sym            = c.symbol.clone();
+                                let net_shares     = c.net_shares;
+                                let net_calls      = c.net_short_call_contracts;
+                                let upside_before  = c.upside_before;
+                                let upside_after   = c.upside_after;
+                                let upside_delta   = upside_after - upside_before;
+                                view! {
+                                    <div class="flex justify-between items-start text-xs">
+                                        <span class="text-gray-400">{sym}</span>
+                                        <div class="text-right space-y-0.5">
+                                            // Upside row — always show if there are short calls before or after.
+                                            {(upside_before > 0.0 || upside_after > 0.0).then(|| {
+                                                let delta_str = if upside_delta.abs() < 1.0 {
+                                                    String::new()
+                                                } else if upside_delta > 0.0 {
+                                                    format!(" (+${:.0})", upside_delta)
+                                                } else {
+                                                    format!(" (−${:.0})", -upside_delta)
+                                                };
+                                                let delta_class = if upside_delta >= 0.0 { "text-blue-300" } else { "text-red-400" };
+                                                view! {
+                                                    <p class=delta_class>
+                                                        {format!("Upside ${:.0} → ${:.0}{}", upside_before, upside_after, delta_str)}
+                                                    </p>
+                                                }
+                                            })}
+                                            {(excess > 0).then(|| view! {
+                                                <p class="text-red-400">
+                                                    {format!("−{} net delta ({} excess contracts)", excess, excess / 100)}
+                                                </p>
+                                            })}
+                                            {(uncovered > 0).then(|| view! {
+                                                <p class="text-yellow-400">
+                                                    {format!("{} shares uncovered", uncovered)}
+                                                </p>
+                                            })}
+                                            {(uncovered == 0 && excess == 0).then(|| view! {
+                                                <p class="text-gray-500">
+                                                    {format!("{} shares, {} contracts", net_shares, net_calls)}
+                                                </p>
+                                            })}
+                                        </div>
+                                    </div>
+                                }
                             }).collect_view()}
                         </div>
                     })}
@@ -1194,10 +1396,15 @@ fn ScenarioCard(
                             <p class="text-blue-300">"LT: " {fmt_cash(total_lt)}</p>
                             <div class="mt-2 space-y-0.5">
                                 {move || {
-                                    if tax_failed.get() {
+                                    if let Some(e) = tax_err.get() {
+                                        let is_missing = e.contains("No tax profile");
                                         view! {
                                             <p class="text-orange-300">
-                                                {format!("Tax ({tax_year}): — ")}
+                                                {if is_missing {
+                                                    format!("Tax ({tax_year}): no profile — ")
+                                                } else {
+                                                    format!("Tax ({tax_year}): {} — ", e)
+                                                }}
                                                 <a href="/tax" class="underline text-gray-400">"set up Taxes"</a>
                                             </p>
                                         }.into_any()

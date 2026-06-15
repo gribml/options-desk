@@ -97,8 +97,10 @@ pub struct TradeResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignmentEvent {
     pub description: String,
-    /// Net P&L on the option itself (premium received − intrinsic loss).
-    pub option_pnl: f64,
+    /// Realized gain/loss for tax purposes.
+    /// For covered calls: (strike + premium − stock_basis) × contracts × 100.
+    /// For everything else: (premium − intrinsic) × contracts × 100.
+    pub realized_gain: f64,
     pub is_long_term: bool,
     /// Cash from the resulting stock transaction (positive = received, negative = paid).
     pub stock_cash_flow: f64,
@@ -116,6 +118,31 @@ pub struct ScenarioGreeks {
     pub rho: f64,
 }
 
+/// Per-symbol coverage analysis: net shares vs net short calls after scenario trades.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverageSummary {
+    pub symbol: String,
+    /// Net long shares in the portfolio after scenario trades.
+    pub net_shares: i32,
+    /// Net short call contracts after scenario trades.
+    pub net_short_call_contracts: i32,
+    /// Sum of (contracts × strike × 100) for all short calls before the scenario.
+    pub upside_before: f64,
+    /// Sum of (contracts × strike × 100) for all short calls after the scenario.
+    pub upside_after: f64,
+}
+
+impl CoverageSummary {
+    /// Shares that have no covering short call.
+    pub fn uncovered_shares(&self) -> i32 {
+        (self.net_shares - self.net_short_call_contracts * 100).max(0)
+    }
+    /// Net short delta beyond what is covered by long shares (excess short exposure).
+    pub fn excess_short_delta(&self) -> i32 {
+        (self.net_short_call_contracts * 100 - self.net_shares).max(0)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioResult {
     pub evaluated_at: DateTime<Utc>,
@@ -125,6 +152,7 @@ pub struct ScenarioResult {
     pub total_st_gain: f64,
     pub total_lt_gain: f64,
     pub greeks: ScenarioGreeks,
+    pub coverage: Vec<CoverageSummary>,
 }
 
 impl ScenarioResult {
