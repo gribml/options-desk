@@ -188,9 +188,8 @@ fn YearSection(
         let user_id = auth.user_id.get().unwrap_or_default();
         let id = profile_id.get().unwrap_or_else(Uuid::new_v4);
         revisions.update(|rs| rs.retain(|r| r.entered_at != entered_at));
-        if let Some(cur) = revisions.get_untracked().last().cloned() {
-            apply_revision_to_form(cur);
-        }
+        let cur = revisions.get_untracked().last().cloned().unwrap_or_default();
+        apply_revision_to_form(cur);
         let profile = TaxProfile { id, tax_year: year, revisions: revisions.get_untracked() };
         spawn_local(async move {
             let _ = supabase::upsert_tax_profile(&token, &user_id, &profile).await;
