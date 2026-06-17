@@ -35,6 +35,29 @@ create policy "users see own scenarios" on scenarios
 
 create index if not exists scenarios_user_id_created_at_idx on scenarios (user_id, created_at desc);
 
+-- ── Tax profiles ──────────────────────────────────────────────────────────────
+-- One row per (user, tax_year). payload holds an append-only list of timestamped
+-- revisions; the latest revision is the current profile. Written by the frontend
+-- (user JWT) and read by the Cloudflare Worker (user JWT, RLS-scoped) to compute
+-- federal tax. The unique (user_id, tax_year) is the upsert conflict target.
+
+create table if not exists tax_profiles (
+    id          uuid primary key,
+    user_id     uuid not null references auth.users(id) on delete cascade,
+    tax_year    smallint not null,
+    payload     jsonb not null,
+    created_at  timestamptz not null default now(),
+    unique (user_id, tax_year)
+);
+
+alter table tax_profiles enable row level security;
+
+drop policy if exists "users see own tax_profiles" on tax_profiles;
+create policy "users see own tax_profiles" on tax_profiles
+    for all using (auth.uid() = user_id);
+
+create index if not exists tax_profiles_user_id_year_idx on tax_profiles (user_id, tax_year);
+
 -- ── Price history ─────────────────────────────────────────────────────────────
 -- Written by the Cloudflare Worker (service key, bypasses RLS).
 -- Read by the frontend (authenticated user JWT).

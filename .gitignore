@@ -3,3 +3,6 @@
 .env
 worker/node_modules
 worker/.dev.vars
+worker/wrangler.local.toml
+worker/.wrangler/
+worker/tmp/

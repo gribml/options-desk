@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use leptos::prelude::*;
+use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
@@ -278,6 +279,42 @@ pub fn PortfolioPage() -> impl IntoView {
 
     let summary = Memo::new(move |_| summarize(&positions.get(), &metrics.get()));
 
+    // Implied liquidation tax per position, computed in one batch by the Worker
+    // against the user's current-year profile. Re-runs when marks change.
+    let implied_tax = RwSignal::new(HashMap::<Uuid, f64>::new());
+    let tax_year = Utc::now().year();
+    Effect::new(move |_| {
+        let token = match auth.token.get() { Some(t) => t, None => return };
+        let ps = positions.get();
+        let ms = metrics.get();
+        let items: Vec<market::TaxItemRequest> = ps.iter().zip(ms.iter())
+            .filter_map(|(p, m)| {
+                let m = m.as_ref()?;
+                // Full pnl (incl. losses) routed by holding period; the marginal
+                // engine handles negatives — do not clamp.
+                let is_lt = p.option_spec.is_none()
+                    && (Utc::now().date_naive() - p.opened_at.date_naive()).num_days() > 365;
+                Some(market::TaxItemRequest {
+                    id: p.id.to_string(),
+                    st_gain: if is_lt { 0.0 } else { m.pnl },
+                    lt_gain: if is_lt { m.pnl } else { 0.0 },
+                })
+            })
+            .collect();
+        if items.is_empty() { return; }
+        spawn_local(async move {
+            if let Ok(batch) = market::estimate_portfolio_tax(&token, tax_year, items).await {
+                let mut map = HashMap::new();
+                for r in batch.results {
+                    if let Ok(uid) = r.id.parse::<Uuid>() {
+                        map.insert(uid, r.tax);
+                    }
+                }
+                implied_tax.set(map);
+            }
+        });
+    });
+
     // Refresh live quotes + option prices on demand.
     let refresh_quotes = move || {
         let token = auth.token.get_untracked().unwrap_or_default();
@@ -392,6 +429,7 @@ pub fn PortfolioPage() -> impl IntoView {
                                 <PositionRow
                                     position=p
                                     metrics=m
+                                    implied_tax=implied_tax
                                     on_delete=move || {
                                         let token = auth.token.get().unwrap_or_default();
                                         spawn_local(async move {
@@ -603,9 +641,11 @@ fn GreekStat(label: &'static str, value: f64, fmt: &'static str) -> impl IntoVie
 fn PositionRow(
     position: Position,
     metrics: Option<PositionMetrics>,
+    implied_tax: RwSignal<HashMap<Uuid, f64>>,
     on_delete: impl Fn() + 'static,
 ) -> impl IntoView {
     let is_option = position.kind == PositionKind::Option;
+    let pid = position.id;
 
     let kind_label = match &position.kind {
         PositionKind::Stock => "Stock".to_string(),
@@ -624,9 +664,6 @@ fn PositionRow(
     let pnl_value  = metrics.as_ref().map(|m| m.pnl);
 
     let total_cost = position.total_cost();
-    let is_lt = (Utc::now().date_naive() - position.opened_at.date_naive()).num_days() > 365;
-    let tax_rate = if is_lt { 0.20_f64 } else { 0.37_f64 };
-    let implied_tax = metrics.as_ref().map(|m| m.pnl.max(0.0) * tax_rate);
 
     view! {
         <div class="bg-panel border border-border rounded-lg p-3 space-y-2">
@@ -674,12 +711,11 @@ fn PositionRow(
                 </span>
                 <span>
                     "~tax "
-                    {match implied_tax {
+                    {move || match implied_tax.get().get(&pid).copied() {
                         Some(t) if t > 0.0 => view! {
                             <span class="text-orange-300">{fmt_cash(-t)}</span>
                         }.into_any(),
-                        Some(_) => view! { <span class="text-gray-600">"—"</span> }.into_any(),
-                        None    => view! { <span class="text-gray-600">"—"</span> }.into_any(),
+                        _ => view! { <span class="text-gray-600">"—"</span> }.into_any(),
                     }}
                 </span>
             </div>
