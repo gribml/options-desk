@@ -19,4 +19,10 @@ impl MarketStore {
             option_meta: RwSignal::new(HashMap::new()),
         }
     }
+
+    pub fn symbols(&self) -> Vec<String> {
+        self.quotes.get().keys().cloned().into_iter().chain(
+            self.option_meta.get().keys().cloned().into_iter()
+        ).collect()
+    }
 }
