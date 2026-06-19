@@ -99,6 +99,7 @@ pub enum LineItemCategory {
     StGain,
     LtGain,
     Rental,
+    ItemizedDeduction,
 }
 
 impl LineItemCategory {
@@ -111,6 +112,7 @@ impl LineItemCategory {
             Self::StGain => "Short-term gain",
             Self::LtGain => "Long-term gain",
             Self::Rental => "Rental income",
+            Self::ItemizedDeduction => "Itemized deduction",
         }
     }
 
@@ -123,6 +125,7 @@ impl LineItemCategory {
             Self::StGain => "st_gain",
             Self::LtGain => "lt_gain",
             Self::Rental => "rental",
+            Self::ItemizedDeduction => "itemized_deduction",
         }
     }
 
@@ -135,12 +138,13 @@ impl LineItemCategory {
             "st_gain" => Some(Self::StGain),
             "lt_gain" => Some(Self::LtGain),
             "rental" => Some(Self::Rental),
+            "itemized_deduction" => Some(Self::ItemizedDeduction),
             _ => None,
         }
     }
 
-    pub fn all() -> [LineItemCategory; 7] {
-        [Self::W2, Self::Interest, Self::NonQualDiv, Self::QualDiv, Self::StGain, Self::LtGain, Self::Rental]
+    pub fn all() -> [LineItemCategory; 8] {
+        [Self::W2, Self::Interest, Self::NonQualDiv, Self::QualDiv, Self::StGain, Self::LtGain, Self::Rental, Self::ItemizedDeduction]
     }
 }
 
@@ -278,7 +282,7 @@ impl TaxProfile {
                     entered_at: Utc::now(),
                     filing_status: s.filing_status,
                     deduction_choice: s.deduction_choice,
-                    itemized_deductions: s.itemized_deductions,
+                    itemized_deductions: sum(LineItemCategory::ItemizedDeduction),
                     carryforward_st_loss: s.carryforward_st_loss,
                     carryforward_lt_loss: s.carryforward_lt_loss,
                     w2_income: sum(LineItemCategory::W2),

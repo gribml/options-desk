@@ -418,7 +418,6 @@ fn LineItemModeView(
     // Local form signals for personal settings
     let fs = RwSignal::new(settings.get_untracked().filing_status);
     let dc = RwSignal::new(settings.get_untracked().deduction_choice);
-    let itemized_s = RwSignal::new(money_str(settings.get_untracked().itemized_deductions));
     let cf_st_s = RwSignal::new(money_str(settings.get_untracked().carryforward_st_loss));
     let cf_lt_s = RwSignal::new(money_str(settings.get_untracked().carryforward_lt_loss));
     let settings_saving = RwSignal::new(false);
@@ -429,7 +428,6 @@ fn LineItemModeView(
         let parse = |sig: RwSignal<String>| sig.get().trim().parse::<f64>().unwrap_or(0.0);
         fs.get() != s.filing_status
             || dc.get() != s.deduction_choice
-            || (parse(itemized_s) - s.itemized_deductions).abs() > 0.005
             || (parse(cf_st_s) - s.carryforward_st_loss).abs() > 0.005
             || (parse(cf_lt_s) - s.carryforward_lt_loss).abs() > 0.005
     });
@@ -462,7 +460,7 @@ fn LineItemModeView(
         settings.set(TaxSettings {
             filing_status: fs.get_untracked(),
             deduction_choice: dc.get_untracked(),
-            itemized_deductions: parse(itemized_s),
+            itemized_deductions: settings.get_untracked().itemized_deductions,
             carryforward_st_loss: parse(cf_st_s),
             carryforward_lt_loss: parse(cf_lt_s),
         });
@@ -519,9 +517,6 @@ fn LineItemModeView(
                             <option value="itemized">"Itemized"</option>
                         </select>
                     </div>
-                    {move || (dc.get() == DeductionChoice::Itemized).then(|| view! {
-                        <MoneyField label="Itemized deductions" signal=itemized_s />
-                    })}
                     <MoneyField label="ST carryforward loss" signal=cf_st_s />
                     <MoneyField label="LT carryforward loss" signal=cf_lt_s />
                 </div>
