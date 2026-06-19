@@ -100,6 +100,7 @@ pub enum LineItemCategory {
     LtGain,
     Rental,
     ItemizedDeduction,
+    PreTaxDeduction,
 }
 
 impl LineItemCategory {
@@ -113,6 +114,7 @@ impl LineItemCategory {
             Self::LtGain => "Long-term gain",
             Self::Rental => "Rental income",
             Self::ItemizedDeduction => "Itemized deduction",
+            Self::PreTaxDeduction => "Pre-tax deduction (401k etc.)",
         }
     }
 
@@ -126,6 +128,7 @@ impl LineItemCategory {
             Self::LtGain => "lt_gain",
             Self::Rental => "rental",
             Self::ItemizedDeduction => "itemized_deduction",
+            Self::PreTaxDeduction => "pre_tax_deduction",
         }
     }
 
@@ -139,12 +142,13 @@ impl LineItemCategory {
             "lt_gain" => Some(Self::LtGain),
             "rental" => Some(Self::Rental),
             "itemized_deduction" => Some(Self::ItemizedDeduction),
+            "pre_tax_deduction" => Some(Self::PreTaxDeduction),
             _ => None,
         }
     }
 
-    pub fn all() -> [LineItemCategory; 8] {
-        [Self::W2, Self::Interest, Self::NonQualDiv, Self::QualDiv, Self::StGain, Self::LtGain, Self::Rental, Self::ItemizedDeduction]
+    pub fn all() -> [LineItemCategory; 9] {
+        [Self::W2, Self::PreTaxDeduction, Self::Interest, Self::NonQualDiv, Self::QualDiv, Self::StGain, Self::LtGain, Self::Rental, Self::ItemizedDeduction]
     }
 }
 
@@ -285,7 +289,7 @@ impl TaxProfile {
                     itemized_deductions: sum(LineItemCategory::ItemizedDeduction),
                     carryforward_st_loss: s.carryforward_st_loss,
                     carryforward_lt_loss: s.carryforward_lt_loss,
-                    w2_income: sum(LineItemCategory::W2),
+                    w2_income: (sum(LineItemCategory::W2) - sum(LineItemCategory::PreTaxDeduction)).max(0.0),
                     interest_income: sum(LineItemCategory::Interest),
                     ordinary_dividends: non_qual + qual,
                     qualified_dividends: qual,
