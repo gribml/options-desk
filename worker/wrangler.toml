@@ -10,6 +10,9 @@ compatibility_date = "2024-01-01"
 #   SUPABASE_SERVICE_KEY — service-role key (bypasses RLS for writes)
 #   SUPABASE_ANON_KEY    — anon key (used to verify user JWTs)
 
+[vars]
+ALLOWED_ORIGIN = "https://options-desk-7c0.pages.dev"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "PLACEHOLDER_D1_DATABASE_NAME"
