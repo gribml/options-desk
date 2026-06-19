@@ -13,7 +13,7 @@ use crate::models::market::{LatestBar, OptionMetaEntry};
 use crate::store::MarketStore;
 use crate::models::{
     option::{OptionSpec, OptionType},
-    position::{Position, PositionKind},
+    position::{match_trades, LotAllocation, Position, PositionEntryMode, PositionKind, Trade},
 };
 use crate::pricing::black_scholes::BsInputs;
 
@@ -70,13 +70,14 @@ struct PositionMetrics {
 
 fn compute_metrics(pos: &Position, md: &MarketData) -> Option<PositionMetrics> {
     let price = md.parsed_price()?;
-    let qty = pos.quantity as f64;
+    let qty = pos.effective_quantity() as f64;
+    let cb = pos.effective_cost_basis();
 
     match &pos.kind {
         PositionKind::Stock => Some(PositionMetrics {
             mark_price: price,
             mark_value: price * qty,
-            pnl: (price - pos.cost_basis) * qty,
+            pnl: (price - cb) * qty,
             delta: qty,
             gamma: 0.0,
             vega: 0.0,
@@ -96,7 +97,7 @@ fn compute_metrics(pos: &Position, md: &MarketData) -> Option<PositionMetrics> {
                 return Some(PositionMetrics {
                     mark_price: intrinsic,
                     mark_value: intrinsic * mult,
-                    pnl: (intrinsic - pos.cost_basis) * mult,
+                    pnl: (intrinsic - cb) * mult,
                     delta: 0.0,
                     gamma: 0.0,
                     vega: 0.0,
@@ -114,7 +115,7 @@ fn compute_metrics(pos: &Position, md: &MarketData) -> Option<PositionMetrics> {
             Some(PositionMetrics {
                 mark_price,
                 mark_value: mark_price * mult,
-                pnl: (mark_price - pos.cost_basis) * mult,
+                pnl: (mark_price - cb) * mult,
                 delta: g.delta * mult,
                 gamma: g.gamma * mult,
                 vega: g.vega * mult,
@@ -293,7 +294,7 @@ pub fn PortfolioPage() -> impl IntoView {
                 // Full pnl (incl. losses) routed by holding period; the marginal
                 // engine handles negatives — do not clamp.
                 let is_lt = p.option_spec.is_none()
-                    && (Utc::now().date_naive() - p.opened_at.date_naive()).num_days() > 365;
+                    && (Utc::now().date_naive() - p.oldest_open_lot_date().date_naive()).num_days() > 365;
                 Some(market::TaxItemRequest {
                     id: p.id.to_string(),
                     st_gain: if is_lt { 0.0 } else { m.pnl },
@@ -427,6 +428,7 @@ pub fn PortfolioPage() -> impl IntoView {
                             let id = p.id;
                             view! {
                                 <PositionRow
+                                    auth=auth
                                     position=p
                                     metrics=m
                                     implied_tax=implied_tax
@@ -435,6 +437,13 @@ pub fn PortfolioPage() -> impl IntoView {
                                         spawn_local(async move {
                                             if supabase::delete_position(&token, &id.to_string()).await.is_ok() {
                                                 positions.update(|ps| ps.retain(|p| p.id != id));
+                                            }
+                                        });
+                                    }
+                                    on_update=move |updated: Position| {
+                                        positions.update(|ps| {
+                                            if let Some(slot) = ps.iter_mut().find(|x| x.id == updated.id) {
+                                                *slot = updated.clone();
                                             }
                                         });
                                     }
@@ -639,13 +648,17 @@ fn GreekStat(label: &'static str, value: f64, fmt: &'static str) -> impl IntoVie
 
 #[component]
 fn PositionRow(
+    auth: AuthState,
     position: Position,
     metrics: Option<PositionMetrics>,
     implied_tax: RwSignal<HashMap<Uuid, f64>>,
     on_delete: impl Fn() + 'static,
+    #[prop(into)] on_update: Callback<Position>,
 ) -> impl IntoView {
     let is_option = position.kind == PositionKind::Option;
     let pid = position.id;
+    let is_trade_log = position.entry_mode == PositionEntryMode::TradeLog;
+    let show_trades = RwSignal::new(false);
 
     let kind_label = match &position.kind {
         PositionKind::Stock => "Stock".to_string(),
@@ -654,16 +667,21 @@ fn PositionRow(
         }).unwrap_or_else(|| "Option".to_string()),
     };
 
-    let qty_class = if position.quantity >= 0 { "text-green-400" } else { "text-red-400" };
+    let eff_qty = position.effective_quantity();
+    let eff_cb  = position.effective_cost_basis();
+    let qty_class = if eff_qty >= 0 { "text-green-400" } else { "text-red-400" };
 
     let (mark_str, pnl_class) = match &metrics {
         Some(m) => (format!("${:.2}", m.mark_price), if m.pnl >= 0.0 { "text-green-400" } else { "text-red-400" }),
         None => ("—".into(), "text-gray-500"),
     };
+    let mark_price = metrics.as_ref().map(|m| m.mark_price);
     let mark_value = metrics.as_ref().map(|m| m.mark_value);
     let pnl_value  = metrics.as_ref().map(|m| m.pnl);
 
-    let total_cost = position.total_cost();
+    let total_cost = eff_cb * eff_qty.abs() as f64
+        * if is_option { 100.0 } else { 1.0 }
+        * eff_qty.signum() as f64;
 
     view! {
         <div class="bg-panel border border-border rounded-lg p-3 space-y-2">
@@ -672,10 +690,10 @@ fn PositionRow(
                     <span class="font-semibold text-sm w-14 shrink-0">{position.symbol.clone()}</span>
                     <span class="text-xs text-gray-400 truncate">{kind_label}</span>
                     <span class=format!("text-sm font-mono shrink-0 {}", qty_class)>
-                        {format!("{:+}", position.quantity)}
+                        {format!("{:+}", eff_qty)}
                     </span>
                     <span class="text-xs text-gray-500 shrink-0">
-                        "cost " {format!("${:.2}", position.cost_basis)}
+                        "cost " {format!("${:.2}", eff_cb)}
                     </span>
                 </div>
                 <div class="flex items-center gap-4 shrink-0">
@@ -735,6 +753,29 @@ fn PositionRow(
                     </div>
                 }
             })}
+
+            // Trade log toggle + panel
+            {is_trade_log.then(|| {
+                let pos2 = position.clone();
+                view! {
+                    <div>
+                        <button
+                            class="text-xs text-gray-500 hover:text-gray-300 transition-colors pl-14"
+                            on:click=move |_| show_trades.update(|v| *v = !*v)
+                        >
+                            {move || if show_trades.get() { "▾ trades" } else { "▸ trades" }}
+                        </button>
+                        {move || show_trades.get().then(|| view! {
+                            <TradeLogPanel
+                                auth=auth
+                                position=pos2.clone()
+                                mark_price=mark_price
+                                on_update=on_update
+                            />
+                        })}
+                    </div>
+                }
+            })}
         </div>
     }
 }
@@ -750,6 +791,252 @@ fn GreekVal(v: f64, fmt: &'static str) -> impl IntoView {
     view! { <span class=cls>{s}</span> }
 }
 
+// ── Trade log panel ───────────────────────────────────────────────────────────
+
+#[component]
+fn TradeLogPanel(
+    auth: AuthState,
+    position: Position,
+    mark_price: Option<f64>,
+    #[prop(into)] on_update: Callback<Position>,
+) -> impl IntoView {
+    let trades_sig = RwSignal::new(position.trades.clone());
+    let lot_alloc_sig = RwSignal::new(position.lot_allocation);
+    let trade_date = RwSignal::new(Utc::now().date_naive().format("%Y-%m-%d").to_string());
+    let trade_qty = RwSignal::new(String::new());
+    let trade_price = RwSignal::new(String::new());
+    let trade_err = RwSignal::new(Option::<String>::None);
+    let is_option = position.kind == PositionKind::Option;
+
+    // Store the base position so do_save_fn can be a Copy closure (Copy requires all captures to be Copy).
+    // StoredValue<T> is Copy when T: Send + Sync + 'static.
+    let base_pos = StoredValue::new(position);
+
+    // All captures of do_save_fn are Copy + Send + Sync, making the closure itself Copy.
+    let do_save_fn = move |new_trades: Vec<Trade>, new_alloc: LotAllocation| {
+        let mut pos = base_pos.get_value();
+        pos.trades = new_trades.clone();
+        pos.lot_allocation = new_alloc;
+        trades_sig.set(new_trades);
+        lot_alloc_sig.set(new_alloc);
+        let tok = auth.token.get_untracked().unwrap_or_default();
+        let uid = auth.user_id.get_untracked().unwrap_or_default();
+        spawn_local(async move {
+            if supabase::upsert_position(&tok, &uid, &pos).await.is_ok() {
+                on_update.run(pos);
+            }
+        });
+    };
+
+    let on_add_trade = move |_| {
+        let qty: i32 = match trade_qty.get_untracked().trim().parse() {
+            Ok(v) if v != 0 => v,
+            _ => { trade_err.set(Some("Quantity must be a non-zero integer.".into())); return; }
+        };
+        let price: f64 = match trade_price.get_untracked().trim().parse() {
+            Ok(v) if v > 0.0 => v,
+            _ => { trade_err.set(Some("Price must be a positive number.".into())); return; }
+        };
+        let date = match chrono::NaiveDate::parse_from_str(trade_date.get_untracked().trim(), "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => { trade_err.set(Some("Date must be YYYY-MM-DD.".into())); return; }
+        };
+        trade_err.set(None);
+        let mut new_trades = trades_sig.get_untracked();
+        new_trades.push(Trade { id: Uuid::new_v4(), date, quantity: qty, price });
+        do_save_fn(new_trades, lot_alloc_sig.get_untracked());
+        trade_qty.set(String::new());
+        trade_price.set(String::new());
+    };
+
+    // on_del is Copy: captures only Copy+Send+Sync values.
+    let on_del = move |trade_id: Uuid| {
+        let new_trades: Vec<Trade> = trades_sig.with_untracked(|t| t.iter().filter(|x| x.id != trade_id).cloned().collect());
+        do_save_fn(new_trades, lot_alloc_sig.get_untracked());
+    };
+
+    let on_alloc_change = move |new_alloc: LotAllocation| {
+        do_save_fn(trades_sig.get_untracked(), new_alloc);
+    };
+
+    view! {
+        <div class="mt-2 ml-14 space-y-4 border-t border-border pt-3">
+
+            // ── Lot allocation toggle ────────────────────────────────────────
+            <div class="flex items-center gap-2 text-xs">
+                <span class="text-gray-500">"Lot allocation:"</span>
+                <div class="flex rounded overflow-hidden border border-border">
+                    <button
+                        class=move || if lot_alloc_sig.get() == LotAllocation::Fifo {
+                            "px-2 py-0.5 bg-blue-600 text-white"
+                        } else {
+                            "px-2 py-0.5 text-gray-400 hover:text-gray-200"
+                        }
+                        on:click=move |_| on_alloc_change(LotAllocation::Fifo)
+                    >"FIFO"</button>
+                    <button
+                        class=move || if lot_alloc_sig.get() == LotAllocation::MinTax {
+                            "px-2 py-0.5 bg-blue-600 text-white"
+                        } else {
+                            "px-2 py-0.5 text-gray-400 hover:text-gray-200"
+                        }
+                        on:click=move |_| on_alloc_change(LotAllocation::MinTax)
+                    >"Min-tax"</button>
+                </div>
+            </div>
+
+            // ── Add trade form ───────────────────────────────────────────────
+            <div class="space-y-2">
+                <p class="text-xs font-medium text-gray-300">"Add trade"</p>
+                <div class="flex flex-wrap gap-2 items-end">
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">"Date"</label>
+                        <input type="date"
+                            class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                            prop:value=move || trade_date.get()
+                            on:input=move |ev| trade_date.set(event_target_value(&ev))
+                        />
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">
+                            {if is_option { "Contracts (neg=short)" } else { "Shares (neg=short)" }}
+                        </label>
+                        <input type="text" placeholder="100"
+                            class="w-28 bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                            prop:value=move || trade_qty.get()
+                            on:input=move |ev| trade_qty.set(event_target_value(&ev))
+                        />
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">
+                            {if is_option { "Premium / share" } else { "Price / share" }}
+                        </label>
+                        <input type="text" placeholder="0.00"
+                            class="w-28 bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                            prop:value=move || trade_price.get()
+                            on:input=move |ev| trade_price.set(event_target_value(&ev))
+                        />
+                    </div>
+                    <button
+                        class="text-sm px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 transition-colors"
+                        on:click=on_add_trade
+                    >"Add"</button>
+                </div>
+                {move || trade_err.get().map(|e| view! { <p class="text-xs text-red-400">{e}</p> })}
+            </div>
+
+            // ── Open lots + realized P&L ─────────────────────────────────────
+            {move || {
+                let ts = trades_sig.get();
+                let alloc = lot_alloc_sig.get();
+                let (open_lots, closed_lots) = match_trades(&ts, alloc);
+
+                let st_pnl: f64 = closed_lots.iter().filter(|l| !l.is_long_term).map(|l| l.realized_pnl).sum();
+                let lt_pnl: f64 = closed_lots.iter().filter(|l| l.is_long_term).map(|l| l.realized_pnl).sum();
+                let has_closed = !closed_lots.is_empty();
+                let has_open = !open_lots.is_empty();
+
+                view! {
+                    <div class="space-y-3">
+                        {has_open.then(|| view! {
+                            <div class="space-y-1">
+                                <p class="text-xs font-medium text-gray-300">"Open lots"</p>
+                                <div class="grid gap-x-4 text-xs text-gray-500"
+                                    style="grid-template-columns: auto auto auto auto auto">
+                                    <span>"Date"</span>
+                                    <span class="text-right">"Qty"</span>
+                                    <span class="text-right">"Cost"</span>
+                                    <span class="text-right">"Days"</span>
+                                    <span class="text-right">"Unreal. P&L"</span>
+                                    {open_lots.iter().map(|lot| {
+                                        let days = (Utc::now().date_naive() - lot.date).num_days();
+                                        let holding = if days > 365 { format!("{}d LT", days) } else { format!("{}d", days) };
+                                        let holding_cls = if days > 365 { "text-green-500" } else { "text-gray-400" };
+                                        let unrealized = mark_price.map(|mp| {
+                                            let mult = if is_option { 100.0 } else { 1.0 };
+                                            (mp - lot.price) * lot.quantity.signum() as f64 * lot.quantity.abs() as f64 * mult
+                                        });
+                                        let pnl_cls = unrealized.map(|p| if p >= 0.0 { "text-green-400" } else { "text-red-400" }).unwrap_or("text-gray-500");
+                                        view! {
+                                            <span class="text-gray-400">{lot.date.format("%b %-d '%y").to_string()}</span>
+                                            <span class="text-right font-mono">{format!("{:+}", lot.quantity)}</span>
+                                            <span class="text-right">{format!("${:.2}", lot.price)}</span>
+                                            <span class=format!("text-right {}", holding_cls)>{holding}</span>
+                                            <span class=format!("text-right font-mono {}", pnl_cls)>
+                                                {match unrealized {
+                                                    Some(v) => fmt_cash(v),
+                                                    None => "—".into(),
+                                                }}
+                                            </span>
+                                        }
+                                    }).collect_view()}
+                                </div>
+                            </div>
+                        })}
+
+                        {has_closed.then(|| view! {
+                            <div class="text-xs space-y-0.5">
+                                <p class="font-medium text-gray-300">"Realized P&L"</p>
+                                {(st_pnl != 0.0).then(|| {
+                                    let cls = if st_pnl >= 0.0 { "text-green-400" } else { "text-red-400" };
+                                    view! {
+                                        <div class="flex justify-between text-gray-400">
+                                            <span>"Short-term"</span>
+                                            <span class=cls>{fmt_cash(st_pnl)}</span>
+                                        </div>
+                                    }
+                                })}
+                                {(lt_pnl != 0.0).then(|| {
+                                    let cls = if lt_pnl >= 0.0 { "text-green-400" } else { "text-red-400" };
+                                    view! {
+                                        <div class="flex justify-between text-gray-400">
+                                            <span>"Long-term"</span>
+                                            <span class=cls>{fmt_cash(lt_pnl)}</span>
+                                        </div>
+                                    }
+                                })}
+                            </div>
+                        })}
+                    </div>
+                }
+            }}
+
+            // ── Trade history ────────────────────────────────────────────────
+            {move || {
+                let ts = trades_sig.get();
+                if ts.is_empty() {
+                    return view! { <p class="text-xs text-gray-600 italic">"No trades yet."</p> }.into_any();
+                }
+                let mut sorted = ts.clone();
+                sorted.sort_by_key(|t| std::cmp::Reverse(t.date));
+                view! {
+                    <div class="space-y-1">
+                        <p class="text-xs font-medium text-gray-300">"Trade history"</p>
+                        {sorted.into_iter().map(|t| {
+                            let tid = t.id;
+                            let qty_cls = if t.quantity > 0 { "text-green-400" } else { "text-red-400" };
+                            let action = if t.quantity > 0 { "Buy" } else { "Sell" };
+                            view! {
+                                <div class="flex items-center justify-between text-xs py-0.5 border-b border-border">
+                                    <div class="flex items-center gap-3">
+                                        <span class="text-gray-500 w-20">{t.date.format("%b %-d '%y").to_string()}</span>
+                                        <span class=qty_cls>{format!("{} {:+}", action, t.quantity)}</span>
+                                        <span class="text-gray-400">{format!("@ ${:.2}", t.price)}</span>
+                                    </div>
+                                    <button
+                                        class="text-gray-600 hover:text-red-400 transition-colors"
+                                        on:click=move |_| on_del(tid)
+                                    >"✕"</button>
+                                </div>
+                            }
+                        }).collect_view()}
+                    </div>
+                }.into_any()
+            }}
+        </div>
+    }
+}
+
 // ── Add position form ─────────────────────────────────────────────────────────
 
 #[component]
@@ -758,9 +1045,10 @@ fn AddPositionForm(
     on_added: impl Fn(Position) + 'static,
 ) -> impl IntoView {
     let on_added = Rc::new(on_added);
-    let symbol    = RwSignal::new(String::new());
-    let kind      = RwSignal::new(PositionKind::Stock);
-    let quantity  = RwSignal::new("1".to_string());
+    let symbol     = RwSignal::new(String::new());
+    let kind       = RwSignal::new(PositionKind::Stock);
+    let entry_mode = RwSignal::new(PositionEntryMode::Snapshot);
+    let quantity   = RwSignal::new("1".to_string());
     let cost_basis = RwSignal::new(String::new());
     let opt_type    = RwSignal::new(OptionType::Call);
     let strike      = RwSignal::new(String::new());
@@ -799,16 +1087,23 @@ fn AddPositionForm(
         let sym = symbol.get().trim().to_uppercase();
         if sym.is_empty() { err.set(Some("Symbol required.".into())); return; }
 
-        let qty: i32 = match quantity.get().trim().parse() {
-            Ok(v) => v,
-            Err(_) => { err.set(Some("Invalid quantity.".into())); return; }
-        };
-        let cb: f64 = match cost_basis.get().trim().parse() {
-            Ok(v) => v,
-            Err(_) => { err.set(Some("Invalid cost basis.".into())); return; }
+        let mode = entry_mode.get();
+
+        let (qty, cb) = if mode == PositionEntryMode::TradeLog {
+            (0i32, 0.0f64)
+        } else {
+            let q: i32 = match quantity.get().trim().parse() {
+                Ok(v) => v,
+                Err(_) => { err.set(Some("Invalid quantity.".into())); return; }
+            };
+            let c: f64 = match cost_basis.get().trim().parse() {
+                Ok(v) => v,
+                Err(_) => { err.set(Some("Invalid cost basis.".into())); return; }
+            };
+            (q, c)
         };
 
-        let position = match kind.get() {
+        let mut position = match kind.get() {
             PositionKind::Stock => Position::new_stock(&sym, qty, cb),
             PositionKind::Option => {
                 let s: f64 = match strike.get().trim().parse() {
@@ -827,6 +1122,7 @@ fn AddPositionForm(
                 })
             }
         };
+        position.entry_mode = mode;
 
         saving.set(true);
         let token = auth.token.get().unwrap_or_default();
@@ -845,6 +1141,7 @@ fn AddPositionForm(
         <form on:submit=on_submit class="bg-panel border border-border rounded-xl p-6 space-y-4">
             <h2 class="text-sm font-medium text-gray-300">"Add position"</h2>
 
+            // Kind toggle
             <div class="flex gap-2">
                 {[(PositionKind::Stock, "Stock"), (PositionKind::Option, "Option")].map(|(k, label)| {
                     let k2 = k.clone();
@@ -861,10 +1158,40 @@ fn AddPositionForm(
                 })}
             </div>
 
+            // Entry mode toggle
+            <div class="flex items-center gap-2 text-xs">
+                <span class="text-gray-500">"Entry:"</span>
+                <div class="flex rounded overflow-hidden border border-border">
+                    <button type="button"
+                        class=move || if entry_mode.get() == PositionEntryMode::Snapshot {
+                            "px-2 py-0.5 bg-blue-600 text-white"
+                        } else {
+                            "px-2 py-0.5 text-gray-400 hover:text-gray-200"
+                        }
+                        on:click=move |_| entry_mode.set(PositionEntryMode::Snapshot)
+                    >"Snapshot"</button>
+                    <button type="button"
+                        class=move || if entry_mode.get() == PositionEntryMode::TradeLog {
+                            "px-2 py-0.5 bg-blue-600 text-white"
+                        } else {
+                            "px-2 py-0.5 text-gray-400 hover:text-gray-200"
+                        }
+                        on:click=move |_| entry_mode.set(PositionEntryMode::TradeLog)
+                    >"Trade log"</button>
+                </div>
+                {move || (entry_mode.get() == PositionEntryMode::TradeLog).then(|| view! {
+                    <span class="text-gray-600 italic">"Add trades after creating."</span>
+                })}
+            </div>
+
             <div class="grid grid-cols-2 gap-3">
-                <MiniInput label="Symbol"              signal=symbol    ph="AAPL" />
-                <MiniInput label="Quantity (neg=short)" signal=quantity  ph="1" />
-                <MiniInput label="Cost basis / share"  signal=cost_basis ph="0.00" />
+                <MiniInput label="Symbol" signal=symbol ph="AAPL" />
+                {move || (entry_mode.get() == PositionEntryMode::Snapshot).then(|| view! {
+                    <>
+                        <MiniInput label="Quantity (neg=short)" signal=quantity  ph="1" />
+                        <MiniInput label="Cost basis / share"  signal=cost_basis ph="0.00" />
+                    </>
+                })}
 
                 {move || (kind.get() == PositionKind::Option).then(|| {
                     let meta = option_meta.get();
