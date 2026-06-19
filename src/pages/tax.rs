@@ -1,4 +1,4 @@
-use chrono::{Datelike, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use leptos::prelude::*;
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
@@ -6,7 +6,10 @@ use wasm_bindgen_futures::spawn_local;
 use crate::api::supabase;
 use crate::app::AuthState;
 use crate::format::fmt_cash;
-use crate::models::tax::{DeductionChoice, FilingStatus, TaxProfile, TaxRevision};
+use crate::models::tax::{
+    DeductionChoice, FilingStatus, LineItemCategory, TaxEntryMode, TaxLineItem, TaxProfile,
+    TaxRevision, TaxSettings,
+};
 
 #[component]
 pub fn TaxPage() -> impl IntoView {
@@ -36,7 +39,6 @@ pub fn TaxPage() -> impl IntoView {
 
     let current_year = Utc::now().year() as u16;
 
-    // Years to display = current year ∪ years with a profile ∪ user-added years.
     let years = move || {
         let mut ys: Vec<u16> = vec![current_year];
         for p in profiles.get() {
@@ -127,7 +129,11 @@ fn YearSection(
     let expanded = RwSignal::new(default_expanded);
     let profile_id = RwSignal::new(existing.as_ref().map(|p| p.id));
     let revisions = RwSignal::new(existing.as_ref().map(|p| p.revisions.clone()).unwrap_or_default());
+    let mode = RwSignal::new(existing.as_ref().map(|p| p.mode).unwrap_or_default());
+    let settings = RwSignal::new(existing.as_ref().map(|p| p.settings.clone()).unwrap_or_default());
+    let line_items = RwSignal::new(existing.as_ref().map(|p| p.line_items.clone()).unwrap_or_default());
 
+    // ── Snapshot-mode form signals ────────────────────────────────────────────
     let initial_seed = existing.as_ref().and_then(|p| p.current().cloned()).unwrap_or_default();
 
     let filing_status = RwSignal::new(initial_seed.filing_status);
@@ -146,26 +152,23 @@ fn YearSection(
     let err = RwSignal::new(Option::<String>::None);
     let saving = RwSignal::new(false);
 
-    // Derives the latest persisted revision from `revisions` so is_dirty always
-    // compares against what's actually saved, not the snapshot from component creation.
     let seed = Memo::new(move |_| revisions.get().last().cloned().unwrap_or_default());
 
-    // True when any form field differs from the last saved revision.
     let is_dirty = Memo::new(move |_| {
         let s = seed.get();
         let parse_f = |s: &str| -> f64 { s.trim().parse().unwrap_or(0.0) };
         filing_status.get() != s.filing_status
             || deduction_choice.get() != s.deduction_choice
-            || (parse_f(&w2.get())       - s.w2_income).abs()            > 0.005
-            || (parse_f(&interest.get()) - s.interest_income).abs()      > 0.005
+            || (parse_f(&w2.get())           - s.w2_income).abs()            > 0.005
+            || (parse_f(&interest.get())     - s.interest_income).abs()      > 0.005
             || (parse_f(&non_qual_div.get()) - (s.ordinary_dividends - s.qualified_dividends).max(0.0)).abs() > 0.005
-            || (parse_f(&qual_div.get())     - s.qualified_dividends).abs() > 0.005
-            || (parse_f(&st_gains.get()) - s.st_capital_gains).abs()     > 0.005
-            || (parse_f(&lt_gains.get()) - s.lt_capital_gains).abs()     > 0.005
-            || (parse_f(&rental.get())   - s.rental_income).abs()        > 0.005
-            || (parse_f(&itemized.get()) - s.itemized_deductions).abs()  > 0.005
-            || (parse_f(&cf_st.get())    - s.carryforward_st_loss).abs() > 0.005
-            || (parse_f(&cf_lt.get())    - s.carryforward_lt_loss).abs() > 0.005
+            || (parse_f(&qual_div.get())     - s.qualified_dividends).abs()  > 0.005
+            || (parse_f(&st_gains.get())     - s.st_capital_gains).abs()     > 0.005
+            || (parse_f(&lt_gains.get())     - s.lt_capital_gains).abs()     > 0.005
+            || (parse_f(&rental.get())       - s.rental_income).abs()        > 0.005
+            || (parse_f(&itemized.get())     - s.itemized_deductions).abs()  > 0.005
+            || (parse_f(&cf_st.get())        - s.carryforward_st_loss).abs() > 0.005
+            || (parse_f(&cf_lt.get())        - s.carryforward_lt_loss).abs() > 0.005
     });
 
     let apply_revision_to_form = move |cur: TaxRevision| {
@@ -190,71 +193,89 @@ fn YearSection(
         revisions.update(|rs| rs.retain(|r| r.entered_at != entered_at));
         let cur = revisions.get_untracked().last().cloned().unwrap_or_default();
         apply_revision_to_form(cur);
-        let profile = TaxProfile { id, tax_year: year, revisions: revisions.get_untracked() };
+        let profile = TaxProfile { id, tax_year: year, revisions: revisions.get_untracked(), mode: mode.get_untracked(), settings: settings.get_untracked(), line_items: line_items.get_untracked() };
         spawn_local(async move {
             let _ = supabase::upsert_tax_profile(&token, &user_id, &profile).await;
         });
     };
 
-    let on_save = move |_| {
-            // Parse all money fields; empty → 0.0, invalid → error.
-            let parse = |sig: RwSignal<String>, name: &str| -> Result<f64, String> {
-                let s = sig.get();
-                let t = s.trim();
-                if t.is_empty() {
-                    return Ok(0.0);
+    let on_save_snapshot = move |_| {
+        let parse = |sig: RwSignal<String>, name: &str| -> Result<f64, String> {
+            let s = sig.get();
+            let t = s.trim();
+            if t.is_empty() { return Ok(0.0); }
+            t.parse::<f64>().map_err(|_| format!("{} must be a number", name))
+        };
+
+        let rev = (|| -> Result<TaxRevision, String> {
+            let qual = parse(qual_div, "Qual dividends")?;
+            let non_qual = parse(non_qual_div, "Non-qual dividends")?;
+            Ok(TaxRevision {
+                entered_at: Utc::now(),
+                filing_status: filing_status.get(),
+                w2_income: parse(w2, "W-2 income")?,
+                interest_income: parse(interest, "Interest")?,
+                ordinary_dividends: non_qual + qual,
+                qualified_dividends: qual,
+                st_capital_gains: parse(st_gains, "Short-term gains")?,
+                lt_capital_gains: parse(lt_gains, "Long-term gains")?,
+                rental_income: parse(rental, "Rental income")?,
+                deduction_choice: deduction_choice.get(),
+                itemized_deductions: parse(itemized, "Itemized deductions")?,
+                carryforward_st_loss: parse(cf_st, "ST carryforward loss")?,
+                carryforward_lt_loss: parse(cf_lt, "LT carryforward loss")?,
+            })
+        })();
+
+        let rev = match rev {
+            Ok(r) => r,
+            Err(e) => { err.set(Some(e)); return; }
+        };
+        err.set(None);
+
+        let id = profile_id.get().unwrap_or_else(Uuid::new_v4);
+        let mut all = revisions.get();
+        all.push(rev.clone());
+        let profile = TaxProfile { id, tax_year: year, revisions: all, mode: mode.get_untracked(), settings: settings.get_untracked(), line_items: line_items.get_untracked() };
+
+        let token = auth.token.get().unwrap_or_default();
+        let user_id = auth.user_id.get().unwrap_or_default();
+        saving.set(true);
+        spawn_local(async move {
+            match supabase::upsert_tax_profile(&token, &user_id, &profile).await {
+                Ok(()) => {
+                    profile_id.set(Some(id));
+                    revisions.update(|r| r.push(rev));
+                    on_saved.run(profile);
                 }
-                t.parse::<f64>().map_err(|_| format!("{} must be a number", name))
-            };
+                Err(e) => err.set(Some(e)),
+            }
+            saving.set(false);
+        });
+    };
 
-            let rev = (|| -> Result<TaxRevision, String> {
-                let qual = parse(qual_div, "Qual dividends")?;
-                let non_qual = parse(non_qual_div, "Non-qual dividends")?;
-                Ok(TaxRevision {
-                    entered_at: Utc::now(),
-                    filing_status: filing_status.get(),
-                    w2_income: parse(w2, "W-2 income")?,
-                    interest_income: parse(interest, "Interest")?,
-                    ordinary_dividends: non_qual + qual,
-                    qualified_dividends: qual,
-                    st_capital_gains: parse(st_gains, "Short-term gains")?,
-                    lt_capital_gains: parse(lt_gains, "Long-term gains")?,
-                    rental_income: parse(rental, "Rental income")?,
-                    deduction_choice: deduction_choice.get(),
-                    itemized_deductions: parse(itemized, "Itemized deductions")?,
-                    carryforward_st_loss: parse(cf_st, "ST carryforward loss")?,
-                    carryforward_lt_loss: parse(cf_lt, "LT carryforward loss")?,
-                })
-            })();
-
-            let rev = match rev {
-                Ok(r) => r,
-                Err(e) => {
-                    err.set(Some(e));
-                    return;
-                }
-            };
-            err.set(None);
-
-            let id = profile_id.get().unwrap_or_else(Uuid::new_v4);
-            let mut all = revisions.get();
-            all.push(rev.clone());
-            let profile = TaxProfile { id, tax_year: year, revisions: all };
-
-            let token = auth.token.get().unwrap_or_default();
-            let user_id = auth.user_id.get().unwrap_or_default();
-            saving.set(true);
-            spawn_local(async move {
-                match supabase::upsert_tax_profile(&token, &user_id, &profile).await {
-                    Ok(()) => {
-                        profile_id.set(Some(id));
-                        revisions.update(|r| r.push(rev));
-                        on_saved.run(profile);
-                    }
-                    Err(e) => err.set(Some(e)),
-                }
-                saving.set(false);
-            });
+    // ── Mode switch ───────────────────────────────────────────────────────────
+    let switch_mode = move |new_mode: TaxEntryMode| {
+        if new_mode == mode.get_untracked() { return; }
+        mode.set(new_mode);
+        let id = profile_id.get_untracked().unwrap_or_else(Uuid::new_v4);
+        let mut profile = TaxProfile {
+            id, tax_year: year,
+            revisions: revisions.get_untracked(),
+            mode: new_mode,
+            settings: settings.get_untracked(),
+            line_items: line_items.get_untracked(),
+        };
+        profile.sync_revisions();
+        revisions.set(profile.revisions.clone());
+        profile_id.set(Some(id));
+        let tok = auth.token.get_untracked().unwrap_or_default();
+        let uid = auth.user_id.get_untracked().unwrap_or_default();
+        spawn_local(async move {
+            if supabase::upsert_tax_profile(&tok, &uid, &profile).await.is_ok() {
+                on_saved.run(profile);
+            }
+        });
     };
 
     view! {
@@ -276,74 +297,436 @@ fn YearSection(
 
             {move || expanded.get().then(|| view! {
                 <div class="px-4 pb-4 space-y-4 border-t border-border pt-4">
-                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                        <div>
-                            <label class="block text-xs text-gray-400 mb-1">"Filing status"</label>
-                            <select
-                                class=SELECT_CLS
-                                prop:value=move || filing_status.get().as_str()
-                                on:change=move |ev| {
-                                    if let Some(f) = FilingStatus::from_str(&event_target_value(&ev)) {
-                                        filing_status.set(f);
-                                    }
-                                }
-                            >
-                                {FilingStatus::all().into_iter().map(|f| view! {
-                                    <option value=f.as_str()>{f.label()}</option>
-                                }).collect_view()}
-                            </select>
-                        </div>
-                        <MoneyField label="W-2 income" signal=w2 />
-                        <MoneyField label="Interest income" signal=interest />
-                        <MoneyField label="Non-qual dividends" signal=non_qual_div />
-                        <MoneyField label="Qual dividends" signal=qual_div />
-                        <MoneyField label="Rental income" signal=rental />
-                        <MoneyField label="Short-term gains" signal=st_gains />
-                        <MoneyField label="Long-term gains" signal=lt_gains />
-                        <div>
-                            <label class="block text-xs text-gray-400 mb-1">"Deduction"</label>
-                            <select
-                                class=SELECT_CLS
-                                prop:value=move || deduction_choice.get().as_str()
-                                on:change=move |ev| {
-                                    if let Some(d) = DeductionChoice::from_str(&event_target_value(&ev)) {
-                                        deduction_choice.set(d);
-                                    }
-                                }
-                            >
-                                <option value="standard">"Standard"</option>
-                                <option value="itemized">"Itemized"</option>
-                            </select>
-                        </div>
-                        <MoneyField label="Itemized deductions" signal=itemized />
-                        <MoneyField label="ST carryforward loss" signal=cf_st />
-                        <MoneyField label="LT carryforward loss" signal=cf_lt />
+                    // ── Mode toggle ───────────────────────────────────────────
+                    <div class="flex rounded overflow-hidden border border-border text-xs w-fit">
+                        <button
+                            class=move || if mode.get() == TaxEntryMode::Snapshot {
+                                "px-3 py-1 bg-blue-600 text-white"
+                            } else {
+                                "px-3 py-1 text-gray-400 hover:text-gray-200 transition-colors"
+                            }
+                            on:click=move |_| switch_mode(TaxEntryMode::Snapshot)
+                        >"Snapshot"</button>
+                        <button
+                            class=move || if mode.get() == TaxEntryMode::LineItem {
+                                "px-3 py-1 bg-blue-600 text-white"
+                            } else {
+                                "px-3 py-1 text-gray-400 hover:text-gray-200 transition-colors"
+                            }
+                            on:click=move |_| switch_mode(TaxEntryMode::LineItem)
+                        >"Line items"</button>
                     </div>
 
-                    <p class="text-xs text-gray-500">
-                        "Non-qual dividends are taxed at ordinary rates; qual dividends at long-term rates. Enter each independently. Carryforward losses are entered as positive numbers."
-                    </p>
+                    {move || match mode.get() {
+                        TaxEntryMode::Snapshot => view! {
+                            <div class="space-y-4">
+                                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                                    <div>
+                                        <label class="block text-xs text-gray-400 mb-1">"Filing status"</label>
+                                        <select
+                                            class=SELECT_CLS
+                                            prop:value=move || filing_status.get().as_str()
+                                            on:change=move |ev| {
+                                                if let Some(f) = FilingStatus::from_str(&event_target_value(&ev)) {
+                                                    filing_status.set(f);
+                                                }
+                                            }
+                                        >
+                                            {FilingStatus::all().into_iter().map(|f| view! {
+                                                <option value=f.as_str()>{f.label()}</option>
+                                            }).collect_view()}
+                                        </select>
+                                    </div>
+                                    <MoneyField label="W-2 income" signal=w2 />
+                                    <MoneyField label="Interest income" signal=interest />
+                                    <MoneyField label="Non-qual dividends" signal=non_qual_div />
+                                    <MoneyField label="Qual dividends" signal=qual_div />
+                                    <MoneyField label="Rental income" signal=rental />
+                                    <MoneyField label="Short-term gains" signal=st_gains />
+                                    <MoneyField label="Long-term gains" signal=lt_gains />
+                                    <div>
+                                        <label class="block text-xs text-gray-400 mb-1">"Deduction"</label>
+                                        <select
+                                            class=SELECT_CLS
+                                            prop:value=move || deduction_choice.get().as_str()
+                                            on:change=move |ev| {
+                                                if let Some(d) = DeductionChoice::from_str(&event_target_value(&ev)) {
+                                                    deduction_choice.set(d);
+                                                }
+                                            }
+                                        >
+                                            <option value="standard">"Standard"</option>
+                                            <option value="itemized">"Itemized"</option>
+                                        </select>
+                                    </div>
+                                    <MoneyField label="Itemized deductions" signal=itemized />
+                                    <MoneyField label="ST carryforward loss" signal=cf_st />
+                                    <MoneyField label="LT carryforward loss" signal=cf_lt />
+                                </div>
 
-                    {move || err.get().map(|e| view! { <p class="text-sm text-red-400">{e}</p> })}
+                                <p class="text-xs text-gray-500">
+                                    "Non-qual dividends are taxed at ordinary rates; qual dividends at long-term rates. Enter each independently. Carryforward losses are entered as positive numbers."
+                                </p>
 
-                    <button
-                        class="text-sm px-4 py-1.5 rounded bg-blue-600 hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        prop:disabled=move || saving.get() || !is_dirty.get()
-                        on:click=on_save
-                    >
-                        {move || if saving.get() { "Saving…" } else { "Save" }}
-                    </button>
+                                {move || err.get().map(|e| view! { <p class="text-sm text-red-400">{e}</p> })}
 
-                    <RevisionHistory
-                        revisions=revisions
-                        on_restore=move |r: TaxRevision| apply_revision_to_form(r)
-                        on_delete=on_delete_revision
-                    />
+                                <button
+                                    class="text-sm px-4 py-1.5 rounded bg-blue-600 hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    prop:disabled=move || saving.get() || !is_dirty.get()
+                                    on:click=on_save_snapshot
+                                >
+                                    {move || if saving.get() { "Saving…" } else { "Save" }}
+                                </button>
+
+                                <RevisionHistory
+                                    revisions=revisions
+                                    on_restore=move |r: TaxRevision| apply_revision_to_form(r)
+                                    on_delete=on_delete_revision
+                                />
+                            </div>
+                        }.into_any(),
+                        TaxEntryMode::LineItem => view! {
+                            <LineItemModeView
+                                auth=auth
+                                year=year
+                                profile_id=profile_id
+                                settings=settings
+                                line_items=line_items
+                                revisions=revisions
+                                on_saved=on_saved
+                            />
+                        }.into_any(),
+                    }}
                 </div>
             })}
         </div>
     }
 }
+
+// ── Line-item mode ────────────────────────────────────────────────────────────
+
+#[component]
+fn LineItemModeView(
+    auth: AuthState,
+    year: u16,
+    profile_id: RwSignal<Option<Uuid>>,
+    settings: RwSignal<TaxSettings>,
+    line_items: RwSignal<Vec<TaxLineItem>>,
+    revisions: RwSignal<Vec<TaxRevision>>,
+    #[prop(into)] on_saved: Callback<TaxProfile>,
+) -> impl IntoView {
+    // Local form signals for personal settings
+    let fs = RwSignal::new(settings.get_untracked().filing_status);
+    let dc = RwSignal::new(settings.get_untracked().deduction_choice);
+    let itemized_s = RwSignal::new(money_str(settings.get_untracked().itemized_deductions));
+    let cf_st_s = RwSignal::new(money_str(settings.get_untracked().carryforward_st_loss));
+    let cf_lt_s = RwSignal::new(money_str(settings.get_untracked().carryforward_lt_loss));
+    let settings_saving = RwSignal::new(false);
+    let settings_err = RwSignal::new(Option::<String>::None);
+
+    let settings_dirty = Memo::new(move |_| {
+        let s = settings.get();
+        let parse = |sig: RwSignal<String>| sig.get().trim().parse::<f64>().unwrap_or(0.0);
+        fs.get() != s.filing_status
+            || dc.get() != s.deduction_choice
+            || (parse(itemized_s) - s.itemized_deductions).abs() > 0.005
+            || (parse(cf_st_s) - s.carryforward_st_loss).abs() > 0.005
+            || (parse(cf_lt_s) - s.carryforward_lt_loss).abs() > 0.005
+    });
+
+    // Persists whatever is currently in the signals to Supabase.
+    let do_save = move || {
+        let id = profile_id.get_untracked().unwrap_or_else(Uuid::new_v4);
+        let mut profile = TaxProfile {
+            id,
+            tax_year: year,
+            revisions: revisions.get_untracked(),
+            mode: TaxEntryMode::LineItem,
+            settings: settings.get_untracked(),
+            line_items: line_items.get_untracked(),
+        };
+        profile.sync_revisions();
+        revisions.set(profile.revisions.clone());
+        profile_id.set(Some(id));
+        let tok = auth.token.get_untracked().unwrap_or_default();
+        let uid = auth.user_id.get_untracked().unwrap_or_default();
+        let p = profile.clone();
+        spawn_local(async move {
+            let _ = supabase::upsert_tax_profile(&tok, &uid, &p).await;
+            on_saved.run(p);
+        });
+    };
+
+    let on_save_settings = move |_| {
+        let parse = |sig: RwSignal<String>| sig.get_untracked().trim().parse::<f64>().unwrap_or(0.0);
+        settings.set(TaxSettings {
+            filing_status: fs.get_untracked(),
+            deduction_choice: dc.get_untracked(),
+            itemized_deductions: parse(itemized_s),
+            carryforward_st_loss: parse(cf_st_s),
+            carryforward_lt_loss: parse(cf_lt_s),
+        });
+        settings_err.set(None);
+        settings_saving.set(true);
+        do_save();
+        settings_saving.set(false);
+    };
+
+    let on_add_item = move |item: TaxLineItem| {
+        line_items.update(|v| v.push(item));
+        do_save();
+    };
+
+    let on_delete_item = move |item_id: Uuid| {
+        line_items.update(|v| v.retain(|i| i.id != item_id));
+        do_save();
+    };
+
+    view! {
+        <div class="space-y-6">
+            // ── Personal settings ─────────────────────────────────────────────
+            <div class="space-y-3">
+                <p class="text-xs font-medium text-gray-300">"Personal settings"</p>
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">"Filing status"</label>
+                        <select
+                            class=SELECT_CLS
+                            prop:value=move || fs.get().as_str()
+                            on:change=move |ev| {
+                                if let Some(f) = FilingStatus::from_str(&event_target_value(&ev)) {
+                                    fs.set(f);
+                                }
+                            }
+                        >
+                            {FilingStatus::all().into_iter().map(|f| view! {
+                                <option value=f.as_str()>{f.label()}</option>
+                            }).collect_view()}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">"Deduction"</label>
+                        <select
+                            class=SELECT_CLS
+                            prop:value=move || dc.get().as_str()
+                            on:change=move |ev| {
+                                if let Some(d) = DeductionChoice::from_str(&event_target_value(&ev)) {
+                                    dc.set(d);
+                                }
+                            }
+                        >
+                            <option value="standard">"Standard"</option>
+                            <option value="itemized">"Itemized"</option>
+                        </select>
+                    </div>
+                    {move || (dc.get() == DeductionChoice::Itemized).then(|| view! {
+                        <MoneyField label="Itemized deductions" signal=itemized_s />
+                    })}
+                    <MoneyField label="ST carryforward loss" signal=cf_st_s />
+                    <MoneyField label="LT carryforward loss" signal=cf_lt_s />
+                </div>
+                {move || settings_err.get().map(|e| view! { <p class="text-xs text-red-400">{e}</p> })}
+                <button
+                    class="text-sm px-4 py-1.5 rounded bg-blue-600 hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    prop:disabled=move || settings_saving.get() || !settings_dirty.get()
+                    on:click=on_save_settings
+                >
+                    {move || if settings_saving.get() { "Saving…" } else { "Save settings" }}
+                </button>
+            </div>
+
+            // ── Add line item ─────────────────────────────────────────────────
+            <AddLineItemRow on_add=move |item| on_add_item(item) />
+
+            // ── Line items list ───────────────────────────────────────────────
+            <LineItemsList line_items=line_items on_delete=move |id| on_delete_item(id) />
+        </div>
+    }
+}
+
+#[component]
+fn AddLineItemRow(#[prop(into)] on_add: Callback<TaxLineItem>) -> impl IntoView {
+    let category = RwSignal::new(LineItemCategory::default());
+    let amount_s = RwSignal::new(String::new());
+    let description_s = RwSignal::new(String::new());
+    let date_s = RwSignal::new(String::new());
+    let err = RwSignal::new(Option::<String>::None);
+
+    let on_click = move |_| {
+        let raw = amount_s.get_untracked();
+        let amt: f64 = match raw.trim().parse::<f64>() {
+            Ok(v) if v > 0.0 => v,
+            _ => {
+                err.set(Some("Amount must be a positive number".into()));
+                return;
+            }
+        };
+        let date_raw = date_s.get_untracked();
+        let date_parsed = if date_raw.trim().is_empty() {
+            None
+        } else {
+            match NaiveDate::parse_from_str(date_raw.trim(), "%Y-%m-%d") {
+                Ok(d) => Some(d),
+                Err(_) => {
+                    err.set(Some("Invalid date".into()));
+                    return;
+                }
+            }
+        };
+        err.set(None);
+        on_add.run(TaxLineItem {
+            id: Uuid::new_v4(),
+            entered_at: Utc::now(),
+            date: date_parsed,
+            category: category.get_untracked(),
+            amount: amt,
+            description: description_s.get_untracked().trim().to_string(),
+        });
+        amount_s.set(String::new());
+        description_s.set(String::new());
+        date_s.set(String::new());
+    };
+
+    view! {
+        <div class="space-y-2">
+            <p class="text-xs font-medium text-gray-300">"Add line item"</p>
+            <div class="flex flex-wrap gap-2 items-end">
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1">"Category"</label>
+                    <select
+                        class="bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                        prop:value=move || category.get().as_str()
+                        on:change=move |ev| {
+                            if let Some(c) = LineItemCategory::from_str(&event_target_value(&ev)) {
+                                category.set(c);
+                            }
+                        }
+                    >
+                        {LineItemCategory::all().into_iter().map(|c| view! {
+                            <option value=c.as_str()>{c.label()}</option>
+                        }).collect_view()}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1">"Amount"</label>
+                    <input
+                        type="text"
+                        placeholder="0"
+                        class="w-28 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                        prop:value=move || amount_s.get()
+                        on:input=move |ev| amount_s.set(event_target_value(&ev))
+                    />
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1">"Description"</label>
+                    <input
+                        type="text"
+                        placeholder="optional"
+                        class="w-40 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                        prop:value=move || description_s.get()
+                        on:input=move |ev| description_s.set(event_target_value(&ev))
+                    />
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1">"Date"</label>
+                    <input
+                        type="date"
+                        class="w-36 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                        prop:value=move || date_s.get()
+                        on:input=move |ev| date_s.set(event_target_value(&ev))
+                    />
+                </div>
+                <button
+                    class="text-sm px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 transition-colors"
+                    on:click=on_click
+                >
+                    "Add"
+                </button>
+            </div>
+            {move || err.get().map(|e| view! { <p class="text-xs text-red-400">{e}</p> })}
+        </div>
+    }
+}
+
+#[component]
+fn LineItemsList(
+    line_items: RwSignal<Vec<TaxLineItem>>,
+    #[prop(into)] on_delete: Callback<Uuid>,
+) -> impl IntoView {
+    view! {
+        {move || {
+            let items = line_items.get();
+            if items.is_empty() {
+                return view! {
+                    <p class="text-xs text-gray-500 italic">"No line items yet."</p>
+                }.into_any();
+            }
+
+            // Per-category totals for non-zero categories
+            let totals: Vec<(LineItemCategory, f64)> = LineItemCategory::all()
+                .into_iter()
+                .filter_map(|cat| {
+                    let sum: f64 = items.iter().filter(|i| i.category == cat).map(|i| i.amount).sum();
+                    if sum > 0.0 { Some((cat, sum)) } else { None }
+                })
+                .collect();
+
+            // Sort items: dated entries by date desc, then by entered_at desc
+            let mut sorted = items.clone();
+            sorted.sort_by(|a, b| {
+                let da = a.date.map(|d| d.and_hms_opt(23, 59, 59).unwrap().and_utc()).unwrap_or(a.entered_at);
+                let db = b.date.map(|d| d.and_hms_opt(23, 59, 59).unwrap().and_utc()).unwrap_or(b.entered_at);
+                db.cmp(&da)
+            });
+
+            view! {
+                <div class="space-y-4">
+                    // Totals summary
+                    <div class="text-xs space-y-1">
+                        <p class="font-medium text-gray-300">"Totals"</p>
+                        {totals.into_iter().map(|(cat, sum)| view! {
+                            <div class="flex justify-between text-gray-400">
+                                <span>{cat.label()}</span>
+                                <span class="text-gray-200">{fmt_cash(sum)}</span>
+                            </div>
+                        }).collect_view()}
+                    </div>
+
+                    // Individual entries
+                    <div class="space-y-0">
+                        {sorted.into_iter().map(|item| {
+                            let item_id = item.id;
+                            let when = item.date
+                                .map(|d| d.format("%b %-d").to_string())
+                                .unwrap_or_else(|| item.entered_at.format("%b %-d").to_string());
+                            view! {
+                                <div class="flex items-center justify-between py-1.5 border-b border-border text-xs">
+                                    <div class="flex items-center gap-3 min-w-0">
+                                        <span class="text-gray-500 shrink-0 w-12">{when}</span>
+                                        <span class="text-gray-400 shrink-0">{item.category.label()}</span>
+                                        {(!item.description.is_empty()).then(|| view! {
+                                            <span class="text-gray-600 truncate">{item.description.clone()}</span>
+                                        })}
+                                    </div>
+                                    <div class="flex items-center gap-3 shrink-0">
+                                        <span class="text-gray-200">{fmt_cash(item.amount)}</span>
+                                        <button
+                                            class="text-gray-600 hover:text-red-400 transition-colors"
+                                            title="Remove"
+                                            on:click=move |_| on_delete.run(item_id)
+                                        >"✕"</button>
+                                    </div>
+                                </div>
+                            }
+                        }).collect_view()}
+                    </div>
+                </div>
+            }.into_any()
+        }}
+    }
+}
+
+// ── Snapshot mode: revision history ──────────────────────────────────────────
 
 #[component]
 fn RevisionHistory(
@@ -356,12 +739,9 @@ fn RevisionHistory(
     view! {
         {move || {
             let revs = revisions.get();
-            // Need at least 2 revisions to have any history to show.
             if revs.len() <= 1 {
                 return None;
             }
-            // Pairs: (newer, older) — diff newer against older to show what changed.
-            // We also keep the older revision so the user can restore to it.
             let pairs: Vec<(TaxRevision, TaxRevision)> = revs
                 .windows(2)
                 .map(|w| (w[1].clone(), w[0].clone()))
@@ -424,7 +804,6 @@ fn RevisionHistory(
     }
 }
 
-/// Returns a list of human-readable change descriptions between two revisions.
 fn revision_diff(older: &TaxRevision, newer: &TaxRevision) -> Vec<String> {
     let mut changes = Vec::new();
 
@@ -436,16 +815,16 @@ fn revision_diff(older: &TaxRevision, newer: &TaxRevision) -> Vec<String> {
     }
 
     let money_fields: &[(&str, f64, f64)] = &[
-        ("W-2",              older.w2_income,            newer.w2_income),
-        ("Interest",         older.interest_income,      newer.interest_income),
-        ("Non-qual div.",    older.ordinary_dividends - older.qualified_dividends, newer.ordinary_dividends - newer.qualified_dividends),
-        ("Qual div.",        older.qualified_dividends,  newer.qualified_dividends),
-        ("ST gains",         older.st_capital_gains,     newer.st_capital_gains),
-        ("LT gains",         older.lt_capital_gains,     newer.lt_capital_gains),
-        ("Rental",           older.rental_income,        newer.rental_income),
-        ("Itemized ded.",    older.itemized_deductions,  newer.itemized_deductions),
-        ("CF ST loss",       older.carryforward_st_loss, newer.carryforward_st_loss),
-        ("CF LT loss",       older.carryforward_lt_loss, newer.carryforward_lt_loss),
+        ("W-2",           older.w2_income,            newer.w2_income),
+        ("Interest",      older.interest_income,       newer.interest_income),
+        ("Non-qual div.", older.ordinary_dividends - older.qualified_dividends, newer.ordinary_dividends - newer.qualified_dividends),
+        ("Qual div.",     older.qualified_dividends,   newer.qualified_dividends),
+        ("ST gains",      older.st_capital_gains,      newer.st_capital_gains),
+        ("LT gains",      older.lt_capital_gains,      newer.lt_capital_gains),
+        ("Rental",        older.rental_income,          newer.rental_income),
+        ("Itemized ded.", older.itemized_deductions,   newer.itemized_deductions),
+        ("CF ST loss",    older.carryforward_st_loss,  newer.carryforward_st_loss),
+        ("CF LT loss",    older.carryforward_lt_loss,  newer.carryforward_lt_loss),
     ];
     for (label, old_v, new_v) in money_fields {
         if (old_v - new_v).abs() > 0.005 {
@@ -459,13 +838,8 @@ fn revision_diff(older: &TaxRevision, newer: &TaxRevision) -> Vec<String> {
 const SELECT_CLS: &str =
     "w-full bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500";
 
-/// Formats a stored amount for an input field — blank for zero, plain number otherwise.
 fn money_str(v: f64) -> String {
-    if v == 0.0 {
-        String::new()
-    } else {
-        format!("{}", v)
-    }
+    if v == 0.0 { String::new() } else { format!("{}", v) }
 }
 
 #[component]
