@@ -73,7 +73,7 @@ impl AuthState {
                     Err(_) => {
                         auth.logout();
                         let win = web_sys::window().unwrap();
-                        win.location().set_href("/login").ok();
+                        win.location().set_href(&format!("{}/login", crate::config::APP_BASE)).ok();
                         break;
                     }
                 }
@@ -108,7 +108,7 @@ pub fn App() -> impl IntoView {
     }
 
     view! {
-        <Router>
+        <Router base=crate::config::APP_BASE>
             <Nav />
             <main class="max-w-7xl mx-auto px-4 py-8">
                 <Routes fallback=|| view! { <NotFound /> }>

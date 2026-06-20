@@ -12,7 +12,7 @@ pub fn Nav() -> impl IntoView {
         <nav class="border-b border-border bg-panel">
             <div class="max-w-7xl mx-auto px-4 h-12 flex items-center justify-between">
                 <div class="flex items-center gap-6">
-                    <span class="font-semibold text-sm tracking-tight">"Options Desk"</span>
+                    <a href="/" class="font-semibold text-sm tracking-tight hover:text-white transition-colors">"Strike"</a>
                     <Show when=move || auth.is_authenticated()>
                         <div class="flex gap-4">
                             <NavLink href="/portfolio">"Portfolio"</NavLink>
@@ -27,7 +27,7 @@ pub fn Nav() -> impl IntoView {
                         class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
                         on:click=move |_| {
                             auth2.logout();
-                            web_sys::window().unwrap().location().set_href("/login").ok();
+                            web_sys::window().unwrap().location().set_href(&format!("{}/login", crate::config::APP_BASE)).ok();
                         }
                     >
                         "Sign out"

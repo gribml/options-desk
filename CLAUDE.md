@@ -5,9 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Frontend (Rust/WASM)
-trunk serve                                      # Dev server on localhost:8090
-trunk build --release                            # Production WASM build → dist/
+# Frontend (Rust/WASM) — app is mounted under /app (see Trunk.toml public_url)
+trunk serve                                      # Dev server; open http://localhost:8090/app/
+trunk build --release                            # Production WASM build → dist/app/
 cargo check --target wasm32-unknown-unknown      # Fast compile check (use this, not cargo check)
 
 # Worker (TypeScript)
@@ -24,6 +24,8 @@ There are no tests.
 ## Architecture
 
 This is a Leptos 0.8 CSR (client-side rendered) WASM app. All pricing math and UI logic runs in the browser. A Cloudflare Worker acts as a thin API gateway — it validates Supabase JWTs and reads from a Cloudflare D1 database. User data (positions, scenarios) is persisted directly to Supabase from the frontend.
+
+**Routing split:** the WASM app is mounted under `/app` (`leptos_router` `base="/app"`, set from `config::APP_BASE`, matching `public_url` in `Trunk.toml`). The site root `/` serves a static, non-WASM landing page (`landing/index.html`) so logged-out visitors don't download the WASM bundle. trunk builds the SPA into `dist/app/`; the deploy workflow copies `landing/index.html` → `dist/index.html` and `landing/_redirects` → `dist/_redirects`. `_redirects` rewrites `/app/*` → `/app/index.html` for client-side-router deep links. Router-driven links (`<A>`, `<Redirect>`) are base-aware automatically; imperative `web_sys` `set_href` navigations must prepend `APP_BASE`.
 
 ```
 Browser (WASM/Leptos)

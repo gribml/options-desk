@@ -1,6 +1,10 @@
+# The WASM app is served under /app so the root (/) can host a static,
+# non-WASM landing page. trunk writes the SPA host + assets into dist/app/;
+# the landing page (landing/index.html) is copied to dist/index.html at deploy.
 [build]
 target = "index.html"
-public_url = "/"
+public_url = "/app/"
+dist = "dist/app"
 
 [watch]
 ignore = []
