@@ -58,7 +58,8 @@ fn evaluate(scenario: &Scenario, positions: &[Position]) -> ScenarioResult {
 
     for pos in positions {
         let spec = match &pos.option_spec { Some(s) => s, None => continue };
-        if pos.quantity >= 0 { continue; }
+        let pos_qty = pos.effective_quantity();
+        if pos_qty >= 0 { continue; }
         if eval_date < spec.expiry { continue; }
         let price = match scenario.price_for(&pos.symbol) { Some(p) => p, None => continue };
         let intrinsic = match spec.option_type {
@@ -66,7 +67,7 @@ fn evaluate(scenario: &Scenario, positions: &[Position]) -> ScenarioResult {
             OptionType::Put  => spec.strike - price,
         };
         if intrinsic <= 0.0 { continue; }
-        let contracts = pos.quantity.unsigned_abs();
+        let contracts = pos_qty.unsigned_abs();
         let stock_cf = match spec.option_type {
             OptionType::Call =>  spec.strike * contracts as f64 * 100.0,
             OptionType::Put  => -spec.strike * contracts as f64 * 100.0,
@@ -76,18 +77,18 @@ fn evaluate(scenario: &Scenario, positions: &[Position]) -> ScenarioResult {
         // the stock sale proceeds: gain = (strike + premium) − stock_basis.
         // For everything else (naked, puts) fall back to option-only P&L.
         let underlying = positions.iter().find(|p| {
-            p.option_spec.is_none() && p.symbol == pos.symbol && p.quantity > 0
+            p.option_spec.is_none() && p.symbol == pos.symbol && p.effective_quantity() > 0
         });
         let (realized_gain, lt) = match (spec.option_type, underlying) {
             (OptionType::Call, Some(stock)) => {
-                let adjusted_basis = stock.cost_basis - pos.cost_basis;
+                let adjusted_basis = stock.effective_cost_basis() - pos.effective_cost_basis();
                 let gain = (spec.strike - adjusted_basis) * contracts as f64 * 100.0;
-                let lt = (eval_date - stock.opened_at.date_naive()).num_days() > 365;
+                let lt = (eval_date - stock.oldest_open_lot_date().date_naive()).num_days() > 365;
                 (gain, lt)
             }
             _ => {
-                let gain = (pos.cost_basis - intrinsic) * contracts as f64 * 100.0;
-                let lt = (eval_date - pos.opened_at.date_naive()).num_days() > 365;
+                let gain = (pos.effective_cost_basis() - intrinsic) * contracts as f64 * 100.0;
+                let lt = (eval_date - pos.oldest_open_lot_date().date_naive()).num_days() > 365;
                 (gain, lt)
             }
         };
@@ -556,7 +557,12 @@ impl TradeEntry {
         let (closes_position_id, closes_cost_basis, closes_is_long, closes_opened_at) =
             if let Some(pid) = self.closes_id.get() {
                 if let Some(p) = positions.iter().find(|p| p.id == pid) {
-                    (Some(pid), Some(p.cost_basis), Some(p.quantity > 0), Some(p.opened_at.date_naive()))
+                    (
+                        Some(pid),
+                        Some(p.effective_cost_basis()),
+                        Some(p.effective_quantity() > 0),
+                        Some(p.oldest_open_lot_date().date_naive()),
+                    )
                 } else { (None, None, None, None) }
             } else { (None, None, None, None) };
 
