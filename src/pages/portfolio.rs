@@ -819,11 +819,18 @@ fn TradeLogPanel(
         pos.lot_allocation = new_alloc;
         trades_sig.set(new_trades);
         lot_alloc_sig.set(new_alloc);
-        let tok = auth.token.get_untracked().unwrap_or_default();
-        let uid = auth.user_id.get_untracked().unwrap_or_default();
+        let Some(tok) = auth.token.get_untracked() else {
+            trade_err.set(Some("Not signed in.".into()));
+            return;
+        };
+        let Some(uid) = auth.user_id.get_untracked() else {
+            trade_err.set(Some("Not signed in.".into()));
+            return;
+        };
         spawn_local(async move {
-            if supabase::upsert_position(&tok, &uid, &pos).await.is_ok() {
-                on_update.run(pos);
+            match supabase::upsert_position(&tok, &uid, &pos).await {
+                Ok(_) => on_update.run(pos),
+                Err(e) => trade_err.set(Some(e)),
             }
         });
     };
