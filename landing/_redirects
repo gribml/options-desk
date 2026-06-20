@@ -1,0 +1,7 @@
+# Cloudflare Pages routing.
+#   /            -> dist/index.html        (static, non-WASM landing page)
+#   /app, /app/* -> dist/app/index.html    (WASM SPA + client-side router fallback)
+# The 200 status rewrites without changing the URL, so deep links and refreshes
+# inside the app (e.g. /app/portfolio) load the SPA host and let the router take over.
+/app           /app/index.html   200
+/app/*         /app/index.html   200

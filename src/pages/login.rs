@@ -30,7 +30,7 @@ pub fn LoginPage() -> impl IntoView {
                     auth.apply_session(resp);
                     auth.start_refresh_loop();
                     let win = web_sys::window().unwrap();
-                    win.location().set_href("/portfolio").ok();
+                    win.location().set_href(&format!("{}/portfolio", crate::config::APP_BASE)).ok();
                 }
                 Err(msg) => {
                     error.set(Some(msg));
@@ -43,7 +43,7 @@ pub fn LoginPage() -> impl IntoView {
     view! {
         <div class="min-h-[80vh] flex items-center justify-center">
             <div class="bg-panel border border-border rounded-xl p-8 w-full max-w-sm">
-                <h1 class="text-2xl font-semibold mb-6 text-center">"Options Desk"</h1>
+                <h1 class="text-2xl font-semibold mb-6 text-center">"Strike"</h1>
 
                 <form on:submit=on_submit class="space-y-4">
                     <div>
