@@ -6,3 +6,5 @@ worker/.dev.vars
 worker/wrangler.local.toml
 worker/.wrangler/
 worker/tmp/
+
+.DS_Store

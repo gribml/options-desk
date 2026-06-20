@@ -34,6 +34,13 @@ jobs:
       - name: Build
         run: trunk build --release
 
+      # trunk emits the WASM SPA into dist/app/ (see Trunk.toml). Drop the static
+      # landing page at the dist root so Cloudflare Pages serves it at /.
+      - name: Assemble static landing page
+        run: |
+          cp landing/index.html dist/index.html
+          cp landing/_redirects dist/_redirects
+
       - name: Deploy to Cloudflare Pages
         run: npx wrangler pages deploy dist --project-name=${{ secrets.CF_PAGES_PROJECT_NAME }}
         env:
