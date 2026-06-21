@@ -27,7 +27,8 @@ pub fn Nav() -> impl IntoView {
                         class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
                         on:click=move |_| {
                             auth2.logout();
-                            web_sys::window().unwrap().location().set_href(&format!("{}/login", crate::config::APP_BASE)).ok();
+                            // Leave the SPA for the static landing page at the site root.
+                            web_sys::window().unwrap().location().set_href("/").ok();
                         }
                     >
                         "Sign out"
