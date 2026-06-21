@@ -13,8 +13,9 @@
 //
 // Fail-closed: if ALLOWED_IPS is unset or empty, ALL requests get 404.
 //
-// To lift the lockdown: delete this file and dist/_routes.json (and drop the
-// `cp landing/_routes.json` line from the deploy workflow), then redeploy.
+// To lift the lockdown: delete this file and landing/_routes.json (and drop the
+// `cp landing/_routes.json dist/_routes.json` line from the deploy workflow),
+// then redeploy.
 export async function onRequest(ctx) {
   const allow = (ctx.env.ALLOWED_IPS || "")
     .split(",")
