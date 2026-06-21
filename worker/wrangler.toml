@@ -2,6 +2,14 @@ name = "options-desk-worker"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
+# Denial-of-wallet guard: cap per-request CPU time (default on Paid is 30000ms).
+# These handlers are I/O-bound (D1 / Supabase fetch) and use only a few ms of
+# actual CPU, so 50ms is ample headroom while bounding the cost a flood of
+# expensive requests could ring up. Raise this if you ever see 1102
+# "Worker exceeded CPU time limit" errors on legitimate traffic.
+[limits]
+cpu_ms = 50
+
 # Local dev: copy .dev.vars.example to .dev.vars and fill in values.
 # Production: set each secret with `wrangler secret put <NAME>`:
 #   ALPACA_KEY           — Alpaca API key ID
