@@ -801,7 +801,6 @@ fn TradeLogPanel(
     #[prop(into)] on_update: Callback<Position>,
 ) -> impl IntoView {
     let trades_sig = RwSignal::new(position.trades.clone());
-    let lot_alloc_sig = RwSignal::new(position.lot_allocation);
     let trade_date = RwSignal::new(Utc::now().date_naive().format("%Y-%m-%d").to_string());
     let trade_qty = RwSignal::new(String::new());
     let trade_price = RwSignal::new(String::new());
@@ -813,12 +812,10 @@ fn TradeLogPanel(
     let base_pos = StoredValue::new(position);
 
     // All captures of do_save_fn are Copy + Send + Sync, making the closure itself Copy.
-    let do_save_fn = move |new_trades: Vec<Trade>, new_alloc: LotAllocation| {
+    let do_save_fn = move |new_trades: Vec<Trade>| {
         let mut pos = base_pos.get_value();
         pos.trades = new_trades.clone();
-        pos.lot_allocation = new_alloc;
         trades_sig.set(new_trades);
-        lot_alloc_sig.set(new_alloc);
         let Some(tok) = auth.token.get_untracked() else {
             trade_err.set(Some("Not signed in.".into()));
             return;
@@ -851,7 +848,7 @@ fn TradeLogPanel(
         trade_err.set(None);
         let mut new_trades = trades_sig.get_untracked();
         new_trades.push(Trade { id: Uuid::new_v4(), date, quantity: qty, price });
-        do_save_fn(new_trades, lot_alloc_sig.get_untracked());
+        do_save_fn(new_trades);
         trade_qty.set(String::new());
         trade_price.set(String::new());
     };
@@ -859,69 +856,42 @@ fn TradeLogPanel(
     // on_del is Copy: captures only Copy+Send+Sync values.
     let on_del = move |trade_id: Uuid| {
         let new_trades: Vec<Trade> = trades_sig.with_untracked(|t| t.iter().filter(|x| x.id != trade_id).cloned().collect());
-        do_save_fn(new_trades, lot_alloc_sig.get_untracked());
-    };
-
-    let on_alloc_change = move |new_alloc: LotAllocation| {
-        do_save_fn(trades_sig.get_untracked(), new_alloc);
+        do_save_fn(new_trades);
     };
 
     view! {
         <div class="mt-2 ml-14 space-y-4 border-t border-border pt-3">
 
-            // ── Lot allocation toggle ────────────────────────────────────────
-            <div class="flex items-center gap-2 text-xs">
-                <span class="text-gray-500">"Lot allocation:"</span>
-                <div class="flex rounded overflow-hidden border border-border">
-                    <button
-                        class=move || if lot_alloc_sig.get() == LotAllocation::Fifo {
-                            "px-2 py-0.5 bg-blue-600 text-white"
-                        } else {
-                            "px-2 py-0.5 text-gray-400 hover:text-gray-200"
-                        }
-                        on:click=move |_| on_alloc_change(LotAllocation::Fifo)
-                    >"FIFO"</button>
-                    <button
-                        class=move || if lot_alloc_sig.get() == LotAllocation::MinTax {
-                            "px-2 py-0.5 bg-blue-600 text-white"
-                        } else {
-                            "px-2 py-0.5 text-gray-400 hover:text-gray-200"
-                        }
-                        on:click=move |_| on_alloc_change(LotAllocation::MinTax)
-                    >"Min-tax"</button>
-                </div>
-            </div>
-
-            // ── Add trade form ───────────────────────────────────────────────
+            // ── Add trade form: amount, price, date ──────────────────────────
             <div class="space-y-2">
                 <p class="text-xs font-medium text-gray-300">"Add trade"</p>
                 <div class="flex flex-wrap gap-2 items-end">
                     <div>
-                        <label class="block text-xs text-gray-400 mb-1">"Date"</label>
-                        <input type="date"
-                            class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
-                            prop:value=move || trade_date.get()
-                            on:input=move |ev| trade_date.set(event_target_value(&ev))
-                        />
-                    </div>
-                    <div>
                         <label class="block text-xs text-gray-400 mb-1">
-                            {if is_option { "Contracts (neg=short)" } else { "Shares (neg=short)" }}
+                            {if is_option { "Amount (contracts, neg = sell)" } else { "Amount (shares, neg = sell)" }}
                         </label>
                         <input type="text" placeholder="100"
-                            class="w-28 bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                            class="w-44 bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
                             prop:value=move || trade_qty.get()
                             on:input=move |ev| trade_qty.set(event_target_value(&ev))
                         />
                     </div>
                     <div>
                         <label class="block text-xs text-gray-400 mb-1">
-                            {if is_option { "Premium / share" } else { "Price / share" }}
+                            {if is_option { "Price (premium / share)" } else { "Price / share" }}
                         </label>
                         <input type="text" placeholder="0.00"
                             class="w-28 bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
                             prop:value=move || trade_price.get()
                             on:input=move |ev| trade_price.set(event_target_value(&ev))
+                        />
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">"Date"</label>
+                        <input type="date"
+                            class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                            prop:value=move || trade_date.get()
+                            on:input=move |ev| trade_date.set(event_target_value(&ev))
                         />
                     </div>
                     <button
@@ -935,8 +905,7 @@ fn TradeLogPanel(
             // ── Open lots + realized P&L ─────────────────────────────────────
             {move || {
                 let ts = trades_sig.get();
-                let alloc = lot_alloc_sig.get();
-                let (open_lots, closed_lots) = match_trades(&ts, alloc);
+                let (open_lots, closed_lots) = match_trades(&ts, LotAllocation::Fifo);
 
                 let st_pnl: f64 = closed_lots.iter().filter(|l| !l.is_long_term).map(|l| l.realized_pnl).sum();
                 let lt_pnl: f64 = closed_lots.iter().filter(|l| l.is_long_term).map(|l| l.realized_pnl).sum();

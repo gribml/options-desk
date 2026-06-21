@@ -19,8 +19,13 @@ pub enum PositionEntryMode {
     TradeLog,
 }
 
+/// Sale/exercise lot-matching method, consumed by [`match_trades`]. This is a
+/// realization-time tax choice (which lots a sale closes), not a property of the
+/// trade log — the portfolio ledger always shows FIFO. `MinTax` is reserved for
+/// scenario modeling, where the user chooses how a sale or assignment is matched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // MinTax is exercised by scenario sale-matching (WIP), not the ledger.
 pub enum LotAllocation {
     #[default]
     Fifo,
@@ -77,8 +82,6 @@ pub struct Position {
     pub entry_mode: PositionEntryMode,
     #[serde(default)]
     pub trades: Vec<Trade>,
-    #[serde(default)]
-    pub lot_allocation: LotAllocation,
 }
 
 impl Position {
@@ -94,7 +97,6 @@ impl Position {
             notes: String::new(),
             entry_mode: PositionEntryMode::Snapshot,
             trades: vec![],
-            lot_allocation: LotAllocation::Fifo,
         }
     }
 
@@ -110,7 +112,6 @@ impl Position {
             notes: String::new(),
             entry_mode: PositionEntryMode::Snapshot,
             trades: vec![],
-            lot_allocation: LotAllocation::Fifo,
         }
     }
 
@@ -157,8 +158,12 @@ impl Position {
         }
     }
 
+    /// Open/closed lots for the portfolio ledger view. Uses FIFO — the standard
+    /// convention for showing which lots remain open and their holding period.
+    /// The choice of allocation method only matters when realizing sales/exercises
+    /// for tax (handled in scenarios), not for recording or displaying the log.
     pub fn compute_lots(&self) -> (Vec<OpenLot>, Vec<ClosedLot>) {
-        match_trades(&self.trades, self.lot_allocation)
+        match_trades(&self.trades, LotAllocation::Fifo)
     }
 }
 
