@@ -15,10 +15,10 @@ pub fn Nav() -> impl IntoView {
                     <a href="/" class="font-semibold text-sm tracking-tight hover:text-white transition-colors">"Strike"</a>
                     <Show when=move || auth.is_authenticated()>
                         <div class="flex gap-4">
-                            <NavLink href="/portfolio">"Portfolio"</NavLink>
-                            <NavLink href="/pricer">"Pricer"</NavLink>
-                            <NavLink href="/scenarios">"Scenarios"</NavLink>
-                            <NavLink href="/tax">"Taxes"</NavLink>
+                            <NavLink href="/app/portfolio">"Portfolio"</NavLink>
+                            <NavLink href="/app/pricer">"Pricer"</NavLink>
+                            <NavLink href="/app/scenarios">"Scenarios"</NavLink>
+                            <NavLink href="/app/tax">"Taxes"</NavLink>
                         </div>
                     </Show>
                 </div>
