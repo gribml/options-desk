@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use leptos_router::hooks::use_navigate;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::api::supabase;
@@ -7,6 +8,7 @@ use crate::app::AuthState;
 #[component]
 pub fn LoginPage() -> impl IntoView {
     let auth = use_context::<AuthState>().expect("AuthState missing");
+    let navigate = use_navigate();
     let email = RwSignal::new(String::new());
     let password = RwSignal::new(String::new());
     let error = RwSignal::new(Option::<String>::None);
@@ -24,13 +26,15 @@ pub fn LoginPage() -> impl IntoView {
         loading.set(true);
 
         let auth = auth.clone();
+        let navigate = navigate.clone();
         spawn_local(async move {
             match supabase::login(&e, &p).await {
                 Ok(resp) => {
                     auth.apply_session(resp);
                     auth.start_refresh_loop();
-                    let win = web_sys::window().unwrap();
-                    win.location().set_href(&format!("{}/portfolio", crate::config::APP_BASE)).ok();
+                    // Client-side router navigation (base-aware → /app/portfolio).
+                    // Avoids a full page reload + server round-trip on the SPA host.
+                    navigate("/portfolio", Default::default());
                 }
                 Err(msg) => {
                     error.set(Some(msg));
