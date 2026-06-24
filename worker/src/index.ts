@@ -704,22 +704,26 @@ export default {
       const authHeader = request.headers.get('Authorization')!;
 
       const url = new URL(request.url);
+      // Under the api.martingale.cc/v1/* route, requests arrive with a /v1
+      // prefix; strip it so the path table matches on both that route and the
+      // workers.dev domain (where paths are served at the root).
+      const path = url.pathname.replace(/^\/v1(?=\/|$)/, '') || '/';
 
       const response = await (async (): Promise<Response> => {
-        if (url.pathname === '/quote' && request.method === 'GET') {
+        if (path === '/quote' && request.method === 'GET') {
           const symbol = url.searchParams.get('symbol')?.toUpperCase();
           if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
           return handleQuote(symbol, env);
         }
 
-        if (url.pathname === '/option-quote' && request.method === 'GET') return handleOptionQuote(url, env);
-        if (url.pathname === '/option-chain' && request.method === 'GET') return handleOptionChain(url, env);
-        if (url.pathname === '/option-meta' && request.method === 'GET') return handleOptionMeta(url, env);
-        if (url.pathname === '/close-prices' && request.method === 'GET') return handleClosePrices(url, env);
-        if (url.pathname === '/forward-vol' && request.method === 'GET') return handleForwardVol(url, env);
-        if (url.pathname === '/term-rates' && request.method === 'GET') return handleTermRates(url, env);
-        if (url.pathname === '/latest-bar' && request.method === 'GET') return handleLatestBar(url, env);
-        if (url.pathname === '/tax' && request.method === 'POST') return handleTax(request, user, authHeader, env);
+        if (path === '/option-quote' && request.method === 'GET') return handleOptionQuote(url, env);
+        if (path === '/option-chain' && request.method === 'GET') return handleOptionChain(url, env);
+        if (path === '/option-meta' && request.method === 'GET') return handleOptionMeta(url, env);
+        if (path === '/close-prices' && request.method === 'GET') return handleClosePrices(url, env);
+        if (path === '/forward-vol' && request.method === 'GET') return handleForwardVol(url, env);
+        if (path === '/term-rates' && request.method === 'GET') return handleTermRates(url, env);
+        if (path === '/latest-bar' && request.method === 'GET') return handleLatestBar(url, env);
+        if (path === '/tax' && request.method === 'POST') return handleTax(request, user, authHeader, env);
 
         return jsonResp({ error: 'Not found' }, 404);
       })();

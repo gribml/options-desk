@@ -47,7 +47,7 @@ pub fn LoginPage() -> impl IntoView {
     view! {
         <div class="min-h-[80vh] flex items-center justify-center">
             <div class="bg-panel border border-border rounded-xl p-8 w-full max-w-sm">
-                <h1 class="text-2xl font-semibold mb-6 text-center">"Strike"</h1>
+                <h1 class="text-2xl font-semibold mb-6 text-center">"Martingale"</h1>
 
                 <form on:submit=on_submit class="space-y-4">
                     <div>

@@ -1,4 +1,4 @@
-# Options Desk
+# Martingale
 
 A personal options portfolio manager compiled to WebAssembly. Runs entirely in the browser — no backend server.
 

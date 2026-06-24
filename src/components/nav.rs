@@ -12,7 +12,7 @@ pub fn Nav() -> impl IntoView {
         <nav class="border-b border-border bg-panel">
             <div class="max-w-7xl mx-auto px-4 h-12 flex items-center justify-between">
                 <div class="flex items-center gap-6">
-                    <a href="/" class="font-semibold text-sm tracking-tight hover:text-white transition-colors">"Strike"</a>
+                    <a href="/" class="font-semibold text-sm tracking-tight hover:text-white transition-colors">"Martingale"</a>
                     <Show when=move || auth.is_authenticated()>
                         <div class="flex gap-4">
                             <NavLink href="/app/portfolio">"Portfolio"</NavLink>

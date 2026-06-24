@@ -2,6 +2,14 @@ name = "options-desk-worker"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
+# Custom route. Requests to api.martingale.cc/v1/* hit this Worker. The /v1
+# prefix is stripped in the fetch handler so the same path table serves both
+# this route and the workers.dev domain. Requires a proxied DNS record for
+# api.martingale.cc in the martingale.cc zone (see deploy notes below).
+routes = [
+  { pattern = "api.martingale.cc/v1/*", zone_name = "martingale.cc" },
+]
+
 # Denial-of-wallet guard: cap per-request CPU time (default on Paid is 30000ms).
 # These handlers are I/O-bound (D1 / Supabase fetch) and use only a few ms of
 # actual CPU, so 50ms is ample headroom while bounding the cost a flood of
