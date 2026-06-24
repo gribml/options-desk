@@ -1,7 +1,18 @@
 # Cloudflare Pages routing.
-#   /            -> dist/index.html        (static, non-WASM landing page)
-#   /app, /app/* -> dist/app/index.html    (WASM SPA + client-side router fallback)
-# The 200 status rewrites without changing the URL, so deep links and refreshes
-# inside the app (e.g. /app/portfolio) load the SPA host and let the router take over.
-/app           /app/index.html   200
-/app/*         /app/index.html   200
+#   /          -> dist/index.html      (static, non-WASM landing page)
+#   /app/<pg>  -> dist/app/index.html  (WASM SPA host; client-side router takes over)
+# The 200 status rewrites without changing the URL, so a deep link or hard reload
+# inside the app (e.g. /app/portfolio) loads the SPA host instead of the landing page.
+#
+# These are enumerated per-route on purpose. A glob (/app/*  ->  /app/index.html)
+# is REJECTED by Cloudflare Pages' loop detector — the destination /app/index.html
+# itself matches /app/*, so Pages flags it as an infinite loop and silently drops
+# the rule, and every deep-link reload falls through to the landing page at /.
+# Exact sources don't collide with /app/index.html, so they're accepted.
+# When you add a top-level app route, add a line here.
+/app             /app/index.html   200
+/app/login       /app/index.html   200
+/app/portfolio   /app/index.html   200
+/app/pricer      /app/index.html   200
+/app/scenarios   /app/index.html   200
+/app/tax         /app/index.html   200
