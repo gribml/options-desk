@@ -27,7 +27,11 @@ cpu_ms = 50
 #   SUPABASE_ANON_KEY    — anon key (used to verify user JWTs)
 
 [vars]
-ALLOWED_ORIGIN = "https://options-desk-7c0.pages.dev"
+# Production origin the SPA is served from. The worker also accepts DEV_ORIGIN
+# (a second allowed origin) — kept here as the Pages preview domain so deploy
+# previews keep working.
+ALLOWED_ORIGIN = "https://martingale.cc"
+DEV_ORIGIN = "https://options-desk-7c0.pages.dev"
 
 [[d1_databases]]
 binding = "DB"
