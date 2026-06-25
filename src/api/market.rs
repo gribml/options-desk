@@ -22,7 +22,7 @@ pub async fn fetch_quote(token: &str, symbol: &str) -> Result<Quote, String> {
     }
 }
 
-// ── Latest bar (live Alpaca fetch, 15-min D1 cache) ───────────────────────────
+// ── Latest bar (live market-data fetch, 15-min D1 cache) ──────────────────────
 
 pub async fn fetch_latest_bar(token: &str, symbol: &str) -> Result<LatestBar, String> {
     let url = format!("{}/latest-bar?symbol={}", worker_base(), symbol);
@@ -95,11 +95,11 @@ pub async fn fetch_option_chain(token: &str, symbol: &str) -> Result<Vec<OptionC
     }
 }
 
-// ── On-demand option chain (one page; DB-cached, Alpaca fallback) ─────────────
+// ── On-demand option chain (one page; DB-cached, live API fallback) ──────────
 
 /// Fetches one page of the live option chain. Pass `page_token` from the prior
 /// page's `next_page_token`; `None` requests the first page (served from the
-/// 15-min D1 cache when fresh, otherwise refetched from Alpaca page-by-page).
+/// 15-min D1 cache when fresh, otherwise refetched from the market data API page-by-page).
 pub async fn fetch_option_chain_live(
     token: &str,
     symbol: &str,

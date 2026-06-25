@@ -168,6 +168,9 @@ pub fn PortfolioPage() -> impl IntoView {
     let show_add = RwSignal::new(false);
     let market_data = RwSignal::new(HashMap::<String, MarketData>::new());
     let quote_loading = RwSignal::new(false);
+    // Symbols whose live quote fetch failed — surfaced in the UI so the user
+    // knows to enter a price manually instead.
+    let quote_errors = RwSignal::new(HashSet::<String>::new());
 
     // Apply latest bars to market_data (shared by both initial load and refresh).
     let apply_bars = move |bars: Vec<LatestBar>| {
@@ -176,6 +179,17 @@ pub fn PortfolioPage() -> impl IntoView {
                 let md = map.entry(b.symbol.clone()).or_default();
                 md.price = format!("{:.2}", b.close);
                 md.ref_price = Some(b.close);
+            }
+        });
+    };
+
+    // Record which requested symbols came back (clear any error) vs failed to
+    // return a quote (flag for manual entry).
+    let mark_quote_results = move |requested: &[String], fetched: &[LatestBar]| {
+        let got: HashSet<&str> = fetched.iter().map(|b| b.symbol.as_str()).collect();
+        quote_errors.update(|errs| {
+            for s in requested {
+                if got.contains(s.as_str()) { errs.remove(s); } else { errs.insert(s.clone()); }
             }
         });
     };
@@ -228,6 +242,7 @@ pub fn PortfolioPage() -> impl IntoView {
                                 store.quotes.update(|map| {
                                     for b in &fetched { map.insert(b.symbol.clone(), b.clone()); }
                                 });
+                                mark_quote_results(&missing, &fetched);
                                 apply_bars(fetched);
                                 quote_loading.set(false);
                             }
@@ -334,6 +349,7 @@ pub fn PortfolioPage() -> impl IntoView {
             store.quotes.update(|map| {
                 for b in &bars { map.insert(b.symbol.clone(), b.clone()); }
             });
+            mark_quote_results(&syms, &bars);
             apply_bars(bars);
             quote_loading.set(false);
         });
@@ -392,9 +408,13 @@ pub fn PortfolioPage() -> impl IntoView {
                         } else {
                             let tok = auth.token.get_untracked().unwrap_or_default();
                             spawn_local(async move {
-                                if let Ok(bar) = market::fetch_latest_bar(&tok, &sym).await {
-                                    store.quotes.update(|map| { map.insert(bar.symbol.clone(), bar.clone()); });
-                                    apply_bars(vec![bar]);
+                                match market::fetch_latest_bar(&tok, &sym).await {
+                                    Ok(bar) => {
+                                        store.quotes.update(|map| { map.insert(bar.symbol.clone(), bar.clone()); });
+                                        mark_quote_results(std::slice::from_ref(&sym), std::slice::from_ref(&bar));
+                                        apply_bars(vec![bar]);
+                                    }
+                                    Err(_) => mark_quote_results(std::slice::from_ref(&sym), &[]),
                                 }
                             });
                         }
@@ -420,6 +440,7 @@ pub fn PortfolioPage() -> impl IntoView {
                         symbols=syms
                         market_data=market_data
                         quote_loading=quote_loading
+                        quote_errors=quote_errors
                         on_refresh_quotes=move || refresh_quotes()
                     />
                 })
@@ -479,6 +500,7 @@ fn MarketInputsPanel(
     symbols: Vec<String>,
     market_data: RwSignal<HashMap<String, MarketData>>,
     quote_loading: RwSignal<bool>,
+    quote_errors: RwSignal<HashSet<String>>,
     on_refresh_quotes: impl Fn() + 'static,
 ) -> impl IntoView {
     view! {
@@ -494,6 +516,15 @@ fn MarketInputsPanel(
                 </button>
             </div>
 
+            // Live-data failure notice — the price fields below are editable.
+            {move || (!quote_errors.get().is_empty()).then(|| view! {
+                <p class="text-xs text-amber-400 bg-amber-950/40 border border-amber-900 rounded px-2 py-1.5">
+                    "⚠ Couldn’t load live prices for "
+                    {let mut s: Vec<String> = quote_errors.get().into_iter().collect(); s.sort(); s.join(", ")}
+                    ". Enter prices manually below."
+                </p>
+            })}
+
             <div class="grid grid-cols-[auto_1fr_1fr_1fr] gap-x-4 gap-y-2 items-center">
                 <span class="text-xs text-gray-500">"Symbol"</span>
                 <span class="text-xs text-gray-500">"Price"</span>
@@ -504,6 +535,7 @@ fn MarketInputsPanel(
                     let (sp, sv, sr, sc) = (sym.clone(), sym.clone(), sym.clone(), sym.clone());
                     let (wp, wv, wr) = (sym.clone(), sym.clone(), sym.clone());
                     let (kp, kv, kr) = (sym.clone(), sym.clone(), sym.clone());
+                    let se = sym.clone();
                     view! {
                         // Symbol + live change badge
                         <span class="text-sm font-semibold flex items-center gap-1.5">
@@ -520,6 +552,12 @@ fn MarketInputsPanel(
                                     })
                                 })
                             }}
+                            {move || quote_errors.get().contains(&se).then(|| view! {
+                                <span class="text-xs font-normal text-amber-400"
+                                    title="Live price unavailable — enter manually">
+                                    "⚠ manual"
+                                </span>
+                            })}
                         </span>
                         <input
                             class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500 w-full"
@@ -1068,8 +1106,8 @@ fn AddPositionForm(
                 }
 
                 // No pipeline data — fall back to the on-demand live chain, which
-                // serves from the 15-min cache or fetches Alpaca page-by-page.
-                // Merge each page into the dropdowns as it arrives.
+                // serves from the 15-min cache or fetches from the market data API
+                // page-by-page. Merge each page into the dropdowns as it arrives.
                 let mut acc: Vec<OptionMetaEntry> = Vec::new();
                 let mut page_token: Option<String> = None;
                 loop {

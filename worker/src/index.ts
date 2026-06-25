@@ -71,6 +71,39 @@ function supabaseBase(env: Env): string {
   return env.SUPABASE_URL.replace(/\/rest\/v1\/?$/, '').replace(/\/$/, '');
 }
 
+const ALPACA_BASE = 'https://data.alpaca.markets';
+const ALPACA_TIMEOUT_MS = 8000;
+
+// Error carrying an HTTP status, so upstream failures map to a sensible response
+// code (504 timeout / 502 bad gateway) instead of a generic 500.
+class UpstreamError extends Error {
+  constructor(message: string, readonly status = 502) {
+    super(message);
+  }
+}
+
+// Fetch from Alpaca with auth headers and an AbortController timeout. A slow or
+// hung upstream is aborted and surfaced as a clean 504 rather than hanging the
+// request open — letting the frontend fall back to manual price entry.
+async function fetchAlpaca(endpoint: string, env: Env): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ALPACA_TIMEOUT_MS);
+  try {
+    return await fetch(`${ALPACA_BASE}/${endpoint}`, {
+      headers: { 'APCA-API-KEY-ID': env.ALPACA_KEY, 'APCA-API-SECRET-KEY': env.ALPACA_SECRET },
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new UpstreamError(`Market data API timed out after ${ALPACA_TIMEOUT_MS}ms`, 504);
+    }
+    console.error('Market data fetch failed:', e);
+    throw new UpstreamError('Market data API request failed', 502);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 interface SupabaseUser {
   id: string;
   email?: string;
@@ -353,14 +386,11 @@ async function handleLatestBar(url: URL, env: Env): Promise<Response> {
     api_endpoint = `v1beta1/options/quotes/latest?symbols=${encodeURIComponent(symbol)}&feed=indicative`
   }
 
-  const alpacaResp = await fetch(
-    `https://data.alpaca.markets/${api_endpoint}`,
-    { headers: { 'APCA-API-KEY-ID': env.ALPACA_KEY, 'APCA-API-SECRET-KEY': env.ALPACA_SECRET } },
-  );
+  const alpacaResp = await fetchAlpaca(api_endpoint, env);
 
   if (!alpacaResp.ok) {
-    const text = await alpacaResp.text();
-    return jsonResp({ error: `Alpaca error: ${text}` }, alpacaResp.status);
+    console.error(`Market data upstream error (${alpacaResp.status}):`, await alpacaResp.text());
+    return jsonResp({ error: 'Market data API error' }, alpacaResp.status);
   }
 
   const data = await alpacaResp.json<{ bar: { o: number; h: number; l: number; c: number; v: number; vw: number; n: number; t: string }; symbol: string }>();
@@ -452,12 +482,10 @@ async function handleOptionChainLive(url: URL, env: Env): Promise<Response> {
   let endpoint = `v1beta1/options/snapshots/${encodeURIComponent(underlying)}?feed=indicative&limit=1000`;
   if (pageToken) endpoint += `&page_token=${encodeURIComponent(pageToken)}`;
 
-  const alpacaResp = await fetch(`https://data.alpaca.markets/${endpoint}`, {
-    headers: { 'APCA-API-KEY-ID': env.ALPACA_KEY, 'APCA-API-SECRET-KEY': env.ALPACA_SECRET },
-  });
+  const alpacaResp = await fetchAlpaca(endpoint, env);
   if (!alpacaResp.ok) {
-    const text = await alpacaResp.text();
-    return jsonResp({ error: `Alpaca error: ${text}` }, alpacaResp.status);
+    console.error(`Market data upstream error (${alpacaResp.status}):`, await alpacaResp.text());
+    return jsonResp({ error: 'Market data API error' }, alpacaResp.status);
   }
 
   const data = await alpacaResp.json<{ snapshots?: Record<string, AlpacaSnapshot>; next_page_token: string | null }>();
@@ -861,7 +889,8 @@ export default {
 
       return withCors(response, cors);
     } catch (e) {
-      return withCors(jsonResp({ error: e instanceof Error ? e.message : 'Internal error' }, 500), cors);
+      const status = e instanceof UpstreamError ? e.status : 500;
+      return withCors(jsonResp({ error: e instanceof Error ? e.message : 'Internal error' }, status), cors);
     }
   },
 } satisfies ExportedHandler<Env>;
