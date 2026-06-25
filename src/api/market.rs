@@ -2,7 +2,7 @@ use gloo_net::http::Request;
 use serde::{Deserialize, Serialize};
 
 use crate::config::WORKER_URL;
-use crate::models::market::{ForwardVolResult, LatestBar, OptionChainEntry, OptionMetaEntry, OptionQuote, Quote};
+use crate::models::market::{ForwardVolResult, LatestBar, OptionChainEntry, OptionChainPage, OptionMetaEntry, OptionQuote, Quote};
 
 // ── Live quotes ───────────────────────────────────────────────────────────────
 
@@ -89,6 +89,35 @@ pub async fn fetch_option_chain(token: &str, symbol: &str) -> Result<Vec<OptionC
 
     if resp.ok() {
         resp.json::<Vec<OptionChainEntry>>().await.map_err(|e| e.to_string())
+    } else {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Err(body["error"].as_str().unwrap_or("Option chain fetch failed").to_string())
+    }
+}
+
+// ── On-demand option chain (one page; DB-cached, Alpaca fallback) ─────────────
+
+/// Fetches one page of the live option chain. Pass `page_token` from the prior
+/// page's `next_page_token`; `None` requests the first page (served from the
+/// 15-min D1 cache when fresh, otherwise refetched from Alpaca page-by-page).
+pub async fn fetch_option_chain_live(
+    token: &str,
+    symbol: &str,
+    page_token: Option<&str>,
+) -> Result<OptionChainPage, String> {
+    let mut url = format!("{}/option-chain-live?symbol={}", worker_base(), symbol);
+    if let Some(pt) = page_token {
+        let encoded = String::from(js_sys::encode_uri_component(pt));
+        url.push_str(&format!("&page_token={}", encoded));
+    }
+    let resp = Request::get(&url)
+        .header("Authorization", &format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.ok() {
+        resp.json::<OptionChainPage>().await.map_err(|e| e.to_string())
     } else {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         Err(body["error"].as_str().unwrap_or("Option chain fetch failed").to_string())

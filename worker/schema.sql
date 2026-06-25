@@ -88,3 +88,29 @@ CREATE TABLE IF NOT EXISTS latest_bars_cache (
     vwap        REAL,
     PRIMARY KEY (symbol)
 );
+
+-- On-demand option-chain cache populated by the /option-chain-live worker route.
+-- Mirrors latest_bars_cache: one row per contract, upserted on every fresh Alpaca
+-- fetch, with a 15-minute freshness window. Distinct from the pipeline-populated
+-- `option_chain` table (which carries calibrated greeks for known symbols).
+CREATE TABLE IF NOT EXISTS option_chain_cache (
+    symbol             TEXT NOT NULL,  -- OCC contract symbol (e.g. AAPL250117C00150000)
+    underlying         TEXT NOT NULL,  -- ticker
+    fetched_at         TEXT NOT NULL,  -- ISO 8601 UTC timestamp of the Alpaca fetch
+    expiration         TEXT,           -- YYYY-MM-DD
+    option_type        TEXT,           -- 'call' | 'put'
+    strike             REAL,
+    bid                REAL,
+    ask                REAL,
+    last_price         REAL,
+    implied_volatility REAL,
+    delta              REAL,
+    gamma              REAL,
+    theta              REAL,
+    vega               REAL,
+    rho                REAL,
+    PRIMARY KEY (symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chain_cache_underlying_fetched
+    ON option_chain_cache (underlying, fetched_at DESC);

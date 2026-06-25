@@ -55,6 +55,7 @@ pub struct OptionChainEntry {
     pub bid: f64,
     pub ask: f64,
     pub mid: f64,
+    #[serde(default)]
     pub last: Option<f64>,
     pub implied_vol: Option<f64>,
     pub delta: Option<f64>,
@@ -63,4 +64,15 @@ pub struct OptionChainEntry {
     pub vega: Option<f64>,
     pub open_interest: Option<f64>,
     pub volume: Option<f64>,
+}
+
+/// One page of an on-demand option-chain fetch (`/option-chain-live`). The
+/// frontend loops while `next_page_token` is `Some`, merging each page into the
+/// expiry/strike dropdowns as it arrives.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OptionChainPage {
+    pub entries: Vec<OptionChainEntry>,
+    pub next_page_token: Option<String>,
+    #[serde(default)]
+    pub cached: bool,
 }

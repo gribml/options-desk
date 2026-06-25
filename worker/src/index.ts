@@ -21,6 +21,7 @@ interface OptionChainEntry {
   bid: number | null;
   ask: number | null;
   mid: number | null;
+  last: number | null;
   implied_vol: number | null;
   delta: number | null;
   gamma: number | null;
@@ -128,7 +129,7 @@ async function handleOptionQuote(url: URL, env: Env): Promise<Response> {
   const strike = parseFloat(strikeStr);
   if (isNaN(strike)) return jsonResp({ error: 'strike must be a number' }, 400);
 
-  const row = await env.DB.prepare(`
+  let row = await env.DB.prepare(`
     SELECT (bid + ask) / 2.0 AS mid, implied_volatility AS implied_vol
     FROM option_chain
     WHERE underlying = ?
@@ -139,6 +140,21 @@ async function handleOptionQuote(url: URL, env: Env): Promise<Response> {
     LIMIT 1
   `).bind(symbol, expiry, type, strike)
     .first<{ mid: number | null; implied_vol: number | null }>();
+
+  // Fall back to the on-demand Alpaca cache when the pipeline has no row for
+  // this contract — so cache-only symbols still price with real IV/mid.
+  if (!row) {
+    row = await env.DB.prepare(`
+      SELECT (bid + ask) / 2.0 AS mid, implied_volatility AS implied_vol
+      FROM option_chain_cache
+      WHERE underlying = ?
+        AND expiration = ?
+        AND option_type = ?
+        AND strike = ?
+      LIMIT 1
+    `).bind(symbol, expiry, type, strike)
+      .first<{ mid: number | null; implied_vol: number | null }>();
+  }
 
   if (!row) return jsonResp({ error: 'No data for option contract' }, 404);
 
@@ -369,6 +385,120 @@ async function handleLatestBar(url: URL, env: Env): Promise<Response> {
     vwap: bar.vw,
     cached: false,
   });
+}
+
+// ── On-demand option chain ──────────────────────────────────────────────────────
+
+// Parses an OCC option symbol from the right (the suffix is fixed-width, the root
+// is variable): ROOT + YYMMDD + C|P + STRIKE×1000 (8 digits, zero-padded).
+//   AAPL250117C00150000 → { expiry: '2025-01-17', type: 'call', strike: 150 }
+function parseOcc(occ: string): { expiry: string; type: 'call' | 'put'; strike: number } | null {
+  if (occ.length < 16) return null;
+  const suffix = occ.slice(-15);
+  const ymd = suffix.slice(0, 6);
+  const cp = suffix.slice(6, 7);
+  const strikeRaw = suffix.slice(7);
+  if (!/^\d{6}$/.test(ymd) || (cp !== 'C' && cp !== 'P') || !/^\d{8}$/.test(strikeRaw)) return null;
+  const expiry = `20${ymd.slice(0, 2)}-${ymd.slice(2, 4)}-${ymd.slice(4, 6)}`;
+  return { expiry, type: cp === 'C' ? 'call' : 'put', strike: parseInt(strikeRaw, 10) / 1000 };
+}
+
+interface AlpacaSnapshot {
+  latestQuote?: { bp?: number; ap?: number };
+  latestTrade?: { p?: number };
+  greeks?: { delta?: number; gamma?: number; theta?: number; vega?: number; rho?: number };
+  impliedVolatility?: number;
+}
+
+// GET /option-chain-live?symbol=AAPL[&page_token=...]
+// On-demand option chain, paginated so each Alpaca page streams back to the
+// frontend (which merges it into the expiry/strike dropdowns) while the next
+// page is fetched. The first page (no page_token) serves from option_chain_cache
+// when it is < 15 min old; otherwise it purges the stale rows and begins a fresh
+// Alpaca paginated fetch, upserting each page into the cache as it goes.
+async function handleOptionChainLive(url: URL, env: Env): Promise<Response> {
+  const underlying = url.searchParams.get('symbol')?.toUpperCase();
+  if (!underlying) return jsonResp({ error: 'symbol required' }, 400);
+  const pageToken = url.searchParams.get('page_token');
+
+  // First page: serve from cache if fresh, else purge stale rows and refetch.
+  if (!pageToken) {
+    const fresh = await env.DB.prepare(`
+      SELECT 1 AS ok FROM option_chain_cache
+      WHERE underlying = ? AND fetched_at >= datetime('now', '-15 minutes')
+      LIMIT 1
+    `).bind(underlying).first<{ ok: number }>();
+
+    if (fresh) {
+      const { results } = await env.DB.prepare(`
+        SELECT symbol, underlying, expiration AS expiry, option_type AS type, strike,
+               bid, ask, (bid + ask) / 2.0 AS mid, last_price AS last,
+               implied_volatility AS implied_vol, delta, gamma, theta, vega,
+               NULL AS open_interest, NULL AS volume
+        FROM option_chain_cache
+        WHERE underlying = ?
+        ORDER BY expiration, option_type, strike
+      `).bind(underlying).all<OptionChainEntry>();
+      return jsonResp({ entries: results, next_page_token: null, cached: true });
+    }
+
+    await env.DB.prepare(`
+      DELETE FROM option_chain_cache
+      WHERE underlying = ? AND fetched_at < datetime('now', '-15 minutes')
+    `).bind(underlying).run();
+  }
+
+  // Fetch one Alpaca page.
+  let endpoint = `v1beta1/options/snapshots/${encodeURIComponent(underlying)}?feed=indicative&limit=1000`;
+  if (pageToken) endpoint += `&page_token=${encodeURIComponent(pageToken)}`;
+
+  const alpacaResp = await fetch(`https://data.alpaca.markets/${endpoint}`, {
+    headers: { 'APCA-API-KEY-ID': env.ALPACA_KEY, 'APCA-API-SECRET-KEY': env.ALPACA_SECRET },
+  });
+  if (!alpacaResp.ok) {
+    const text = await alpacaResp.text();
+    return jsonResp({ error: `Alpaca error: ${text}` }, alpacaResp.status);
+  }
+
+  const data = await alpacaResp.json<{ snapshots?: Record<string, AlpacaSnapshot>; next_page_token: string | null }>();
+  const snapshots = data.snapshots ?? {};
+
+  const insert = env.DB.prepare(`
+    INSERT OR REPLACE INTO option_chain_cache
+      (symbol, underlying, fetched_at, expiration, option_type, strike,
+       bid, ask, last_price, implied_volatility, delta, gamma, theta, vega, rho)
+    VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const entries: OptionChainEntry[] = [];
+  const stmts = [];
+  for (const [occ, snap] of Object.entries(snapshots)) {
+    const parsed = parseOcc(occ);
+    if (!parsed) continue;
+    const bid = snap.latestQuote?.bp ?? 0;
+    const ask = snap.latestQuote?.ap ?? 0;
+    const mid = bid && ask ? (bid + ask) / 2 : (bid || ask || 0);
+    const last = snap.latestTrade?.p ?? null;
+    const iv = snap.impliedVolatility ?? null;
+    const g = snap.greeks ?? {};
+
+    entries.push({
+      symbol: occ, underlying, expiry: parsed.expiry, type: parsed.type, strike: parsed.strike,
+      bid, ask, mid, last, implied_vol: iv,
+      delta: g.delta ?? null, gamma: g.gamma ?? null, theta: g.theta ?? null, vega: g.vega ?? null,
+      open_interest: null, volume: null,
+    });
+    stmts.push(insert.bind(
+      occ, underlying, parsed.expiry, parsed.type, parsed.strike,
+      bid, ask, last, iv, g.delta ?? null, g.gamma ?? null, g.theta ?? null, g.vega ?? null, g.rho ?? null,
+    ));
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+
+  entries.sort((a, b) =>
+    a.expiry.localeCompare(b.expiry) || a.type.localeCompare(b.type) || a.strike - b.strike);
+
+  return jsonResp({ entries, next_page_token: data.next_page_token ?? null, cached: false });
 }
 
 // ── Federal tax engine ──────────────────────────────────────────────────────────
@@ -718,6 +848,7 @@ export default {
 
         if (path === '/option-quote' && request.method === 'GET') return handleOptionQuote(url, env);
         if (path === '/option-chain' && request.method === 'GET') return handleOptionChain(url, env);
+        if (path === '/option-chain-live' && request.method === 'GET') return handleOptionChainLive(url, env);
         if (path === '/option-meta' && request.method === 'GET') return handleOptionMeta(url, env);
         if (path === '/close-prices' && request.method === 'GET') return handleClosePrices(url, env);
         if (path === '/forward-vol' && request.method === 'GET') return handleForwardVol(url, env);

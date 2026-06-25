@@ -1043,13 +1043,40 @@ fn AddPositionForm(
             }
             let tok = auth.token.get().unwrap_or_default();
             spawn_local(async move {
-                match market::fetch_option_meta(&tok, &sym).await {
-                    Ok(meta) => {
+                // Prefer the pipeline-populated chain when it covers this symbol.
+                if let Ok(meta) = market::fetch_option_meta(&tok, &sym).await {
+                    if !meta.is_empty() {
                         store.option_meta.update(|map| { map.insert(sym.clone(), meta.clone()); });
                         option_meta.set(meta);
+                        return;
                     }
-                    Err(_) => option_meta.set(vec![]),
                 }
+
+                // No pipeline data — fall back to the on-demand live chain, which
+                // serves from the 15-min cache or fetches Alpaca page-by-page.
+                // Merge each page into the dropdowns as it arrives.
+                let mut acc: Vec<OptionMetaEntry> = Vec::new();
+                let mut page_token: Option<String> = None;
+                loop {
+                    match market::fetch_option_chain_live(&tok, &sym, page_token.as_deref()).await {
+                        Ok(page) => {
+                            for e in &page.entries {
+                                acc.push(OptionMetaEntry {
+                                    expiry: e.expiry.clone(),
+                                    option_type: e.option_type.clone(),
+                                    strike: e.strike,
+                                });
+                            }
+                            option_meta.set(acc.clone());
+                            match page.next_page_token {
+                                Some(t) => page_token = Some(t),
+                                None => break,
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                store.option_meta.update(|map| { map.insert(sym.clone(), acc); });
             });
         } else {
             option_meta.set(vec![]);
@@ -1099,6 +1126,27 @@ fn AddPositionForm(
             }
         };
         position.entry_mode = mode;
+
+        // Fire-and-forget: warm the quote + option-chain caches for a freshly
+        // added stock so its mark and a future option entry have data ready.
+        // Both fill in asynchronously — the Add itself doesn't block on them.
+        if kind.get() == PositionKind::Stock {
+            let warm_tok = auth.token.get().unwrap_or_default();
+            let warm_sym = sym.clone();
+            spawn_local(async move {
+                let _ = market::fetch_latest_bar(&warm_tok, &warm_sym).await;
+                let mut page_token: Option<String> = None;
+                loop {
+                    match market::fetch_option_chain_live(&warm_tok, &warm_sym, page_token.as_deref()).await {
+                        Ok(page) => match page.next_page_token {
+                            Some(t) => page_token = Some(t),
+                            None => break,
+                        },
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
 
         saving.set(true);
         let token = auth.token.get().unwrap_or_default();
