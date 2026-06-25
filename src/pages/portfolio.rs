@@ -381,8 +381,23 @@ pub fn PortfolioPage() -> impl IntoView {
                 <AddPositionForm
                     auth=auth
                     on_added=move |p: Position| {
+                        let sym = p.symbol.clone();
                         positions.update(|ps| ps.push(p));
                         show_add.set(false);
+
+                        // Pull a live quote for the new symbol so its mark fills in
+                        // without a page refresh. Serve from cache when we have it.
+                        if let Some(cached) = store.quotes.get_untracked().get(&sym).cloned() {
+                            apply_bars(vec![cached]);
+                        } else {
+                            let tok = auth.token.get_untracked().unwrap_or_default();
+                            spawn_local(async move {
+                                if let Ok(bar) = market::fetch_latest_bar(&tok, &sym).await {
+                                    store.quotes.update(|map| { map.insert(bar.symbol.clone(), bar.clone()); });
+                                    apply_bars(vec![bar]);
+                                }
+                            });
+                        }
                     }
                 />
             })}
