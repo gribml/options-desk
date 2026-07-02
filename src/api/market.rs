@@ -2,7 +2,7 @@ use gloo_net::http::Request;
 use serde::{Deserialize, Serialize};
 
 use crate::config::WORKER_URL;
-use crate::models::market::{ForwardVolResult, LatestBar, OptionChainEntry, OptionChainPage, OptionMetaEntry, OptionQuote, Quote};
+use crate::models::market::{ForwardVolResult, LatestBar, OptionChainEntry, OptionChainPage, OptionHistoryPoint, OptionMetaEntry, OptionQuote, Quote};
 
 // ── Live quotes ───────────────────────────────────────────────────────────────
 
@@ -121,6 +121,35 @@ pub async fn fetch_option_chain_live(
     } else {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         Err(body["error"].as_str().unwrap_or("Option chain fetch failed").to_string())
+    }
+}
+
+// ── Option history (per-contract price/IV time series) ───────────────────────
+
+/// Historical time series for a single contract, one point per snapshot date.
+/// Returns an empty vec when the pipeline has no history for the contract yet.
+pub async fn fetch_option_history(
+    token: &str,
+    underlying: &str,
+    expiry: &str,
+    option_type: &str,
+    strike: f64,
+) -> Result<Vec<OptionHistoryPoint>, String> {
+    let url = format!(
+        "{}/option-history?underlying={}&expiry={}&type={}&strike={}",
+        worker_base(), underlying, expiry, option_type, strike,
+    );
+    let resp = Request::get(&url)
+        .header("Authorization", &format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.ok() {
+        resp.json::<Vec<OptionHistoryPoint>>().await.map_err(|e| e.to_string())
+    } else {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Err(body["error"].as_str().unwrap_or("Option history fetch failed").to_string())
     }
 }
 

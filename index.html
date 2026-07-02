@@ -26,6 +26,15 @@
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+    <!-- uPlot: lightweight canvas charts for the Combos tab (~15KB gzip) -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+    <style>
+      /* Match uPlot chrome to the dark theme */
+      .u-title { color: #cbd5e1; font-size: 0.8rem; font-weight: 500; }
+      .u-legend { color: #9ca3af; font-size: 0.75rem; }
+      .uplot, .u-wrap { margin: 0 auto; }
+    </style>
     <link data-trunk rel="rust" data-wasm-opt="z" />
   </head>
   <body class="bg-surface text-gray-100 font-mono min-h-screen">

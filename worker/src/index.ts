@@ -214,6 +214,33 @@ async function handleOptionChain(url: URL, env: Env): Promise<Response> {
   return jsonResp(results);
 }
 
+// GET /option-history?underlying=AAPL&expiry=2025-01-17&type=call&strike=150
+// Historical per-contract time series from the accumulated option_chain
+// snapshots: one point per snapshot_date with its mid price and implied vol.
+// Used by the Combos tracker to plot a leg's price/vol history.
+async function handleOptionHistory(url: URL, env: Env): Promise<Response> {
+  const underlying = url.searchParams.get('underlying')?.toUpperCase();
+  const expiry = url.searchParams.get('expiry');
+  const type = url.searchParams.get('type');
+  const strike = parseFloat(url.searchParams.get('strike') ?? '');
+
+  if (!underlying || !expiry || (type !== 'call' && type !== 'put') || !Number.isFinite(strike)) {
+    return jsonResp({ error: 'underlying, expiry, type (call|put), and strike are required' }, 400);
+  }
+
+  const { results } = await env.DB.prepare(`
+    SELECT snapshot_date AS t,
+           (bid + ask) / 2.0 AS mid,
+           implied_volatility AS implied_vol
+    FROM option_chain
+    WHERE underlying = ? AND expiration = ? AND option_type = ? AND strike = ?
+    ORDER BY snapshot_date
+  `).bind(underlying, expiry, type, strike)
+    .all<{ t: string; mid: number | null; implied_vol: number | null }>();
+
+  return jsonResp(results);
+}
+
 // GET /option-meta?symbol=AAPL
 // Returns distinct (expiry, option_type, strike) tuples from the latest snapshot.
 // Lighter than /option-chain — used to populate expiry/strike dropdowns in the UI.
@@ -876,6 +903,7 @@ export default {
 
         if (path === '/option-quote' && request.method === 'GET') return handleOptionQuote(url, env);
         if (path === '/option-chain' && request.method === 'GET') return handleOptionChain(url, env);
+        if (path === '/option-history' && request.method === 'GET') return handleOptionHistory(url, env);
         if (path === '/option-chain-live' && request.method === 'GET') return handleOptionChainLive(url, env);
         if (path === '/option-meta' && request.method === 'GET') return handleOptionMeta(url, env);
         if (path === '/close-prices' && request.method === 'GET') return handleClosePrices(url, env);

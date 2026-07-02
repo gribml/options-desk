@@ -2,7 +2,7 @@ use gloo_net::http::Request;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{SUPABASE_ANON_KEY, SUPABASE_URL};
-use crate::models::{position::Position, scenario::Scenario, tax::TaxProfile};
+use crate::models::{combo::Combo, position::Position, scenario::Scenario, tax::TaxProfile};
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -246,6 +246,68 @@ pub async fn delete_scenario(token: &str, scenario_id: &str) -> Result<(), Strin
         Ok(())
     } else {
         Err(format!("Delete scenario failed: {}", resp.status()))
+    }
+}
+
+// ── Combos ────────────────────────────────────────────────────────────────────
+
+pub async fn fetch_combos(token: &str, user_id: &str) -> Result<Vec<Combo>, String> {
+    let url = format!(
+        "{}?user_id=eq.{}&select=payload&order=created_at.desc",
+        rest_url("combos"),
+        user_id
+    );
+    let resp = authed_get(&url, token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.ok() {
+        return Err(format!("Fetch combos failed: {}", resp.status()));
+    }
+
+    let rows: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(rows.into_iter()
+        .filter_map(|r| serde_json::from_value::<Combo>(r["payload"].clone()).ok())
+        .collect())
+}
+
+pub async fn upsert_combo(token: &str, user_id: &str, combo: &Combo) -> Result<(), String> {
+    let body = serde_json::json!({
+        "id": combo.id.to_string(),
+        "user_id": user_id,
+        "payload": serde_json::to_value(combo).map_err(|e| e.to_string())?,
+    });
+
+    let url = rest_url("combos");
+    let resp = authed_post(&url, token)
+        .header("Prefer", "resolution=merge-duplicates,return=minimal")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.ok() {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("Upsert combo failed: {} — {}", status, body))
+    }
+}
+
+pub async fn delete_combo(token: &str, combo_id: &str) -> Result<(), String> {
+    let url = format!("{}?id=eq.{}", rest_url("combos"), combo_id);
+    let resp = authed_delete(&url, token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(format!("Delete combo failed: {}", resp.status()))
     }
 }
 

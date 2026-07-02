@@ -80,3 +80,13 @@ create policy "authenticated users read price_history" on price_history
     for select using (auth.role() = 'authenticated');
 
 create index if not exists price_history_symbol_date_idx on price_history (symbol, date desc);
+
+create table if not exists combos (
+  id uuid primary key,
+  user_id uuid not null references auth.users(id) default auth.uid(),
+  payload jsonb not null,
+  created_at timestamptz
+);
+alter table combos enable row level security;
+create policy "own combos" on combos
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);

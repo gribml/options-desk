@@ -66,6 +66,14 @@ pub struct OptionChainEntry {
     pub volume: Option<f64>,
 }
 
+/// One point in a contract's historical time series (`/option-history`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OptionHistoryPoint {
+    pub t: String, // snapshot date, YYYY-MM-DD
+    pub mid: Option<f64>,
+    pub implied_vol: Option<f64>,
+}
+
 /// One page of an on-demand option-chain fetch (`/option-chain-live`). The
 /// frontend loops while `next_page_token` is `Some`, merging each page into the
 /// expiry/strike dropdowns as it arrives.
