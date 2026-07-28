@@ -6,7 +6,10 @@
     "types": ["@cloudflare/workers-types"],
     "strict": true,
     "moduleResolution": "bundler",
-    "noEmit": true
+    "noEmit": true,
+    // Vitest's transitive .d.ts files assume the DOM lib, which
+    // @cloudflare/workers-types replaces. Our own sources are still fully checked.
+    "skipLibCheck": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

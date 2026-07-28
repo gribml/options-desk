@@ -19,7 +19,12 @@ cd worker && npm run deploy                      # Deploy to Cloudflare Workers
 ./scripts/bars-1min.sh AAPL 2024-01-01 2024-01-02 out.json  # Curl Alpaca 1-min bars
 ```
 
-There are no tests.
+The Rust frontend has no tests. The worker's federal tax engine does:
+
+```bash
+cd worker && npm test                            # vitest — worker/test/tax.test.ts
+cd worker && npm run typecheck                   # tsc --noEmit (src + test)
+```
 
 ## Architecture
 
@@ -59,10 +64,12 @@ Copy `.env.example` to `.env` to get started. The built WASM binary contains the
 - `src/config.rs` — compile-time env vars
 - `src/format.rs` — number formatting + `Num` component
 - `src/pricing/black_scholes.rs` — European option pricing, full Greeks, bisection IV solver
-- `src/pages/scenarios.rs` — `evaluate()` function: accumulates trade cash flows, detects option assignments, applies tax (37% ST / 20% LT) to `net_cash`
+- `src/pages/scenarios.rs` — `evaluate()` function: accumulates trade cash flows, detects option assignments, and characterises realized gains as ST/LT. `net_cash` is pre-tax; the tax figure comes from the Worker's `/tax` endpoint
 - `src/api/market.rs` — all Worker HTTP calls
 - `src/api/supabase.rs` — all Supabase REST calls (positions, scenarios, auth)
-- `worker/src/index.ts` — Cloudflare Worker: JWT verification via Supabase, D1 queries
+- `worker/src/index.ts` — Cloudflare Worker: JWT verification via Supabase, D1 queries, `/tax` endpoint
+- `worker/src/tax.ts` — federal tax engine (§1 brackets, §1(h) preferential stacking, §1211(b) loss netting, §1411 NIIT). Pure functions, no Worker bindings — the year constant tables need updating each year from the IRS Rev. Proc. The file header lists what is deliberately out of scope (AMT, state tax, §1256, wash sales)
+- `worker/test/tax.test.ts` — tax engine tests; expected figures are hand-computed from the published rate schedules and the Form 1040 Qualified Dividends & Capital Gain Tax Worksheet
 - `worker/schema.sql` — D1 table definitions (`bars_1min`, `option_chain`)
 
 ### Data Storage
