@@ -6,6 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::api::{market, supabase};
 use crate::app::AuthState;
 use crate::charts::{self, LinePlot, Series};
+use crate::components::ui::{Callout, Disclosure, Hint, Info, Label, Tone};
 use crate::models::combo::{Combo, ComboLegSpec};
 use crate::models::market::OptionMetaEntry;
 use crate::models::option::OptionType;
@@ -46,12 +47,17 @@ pub fn PricerPage() -> impl IntoView {
 
     view! {
         <div class="max-w-4xl mx-auto space-y-6">
-            <h1 class="text-xl font-semibold">"Pricer"</h1>
+            <div>
+                <h1 class="text-xl font-semibold">"Pricer"</h1>
+                <p class="text-xs text-gray-500 mt-1 font-sans">
+                    "Work out what an option contract is worth, and what would have to happen for that to change."
+                </p>
+            </div>
 
             <div class="flex gap-2 border-b border-border">
-                {tab_btn(Tab::Pricer, "Black-Scholes")}
-                {tab_btn(Tab::Surface, "Vol Surface")}
-                {tab_btn(Tab::Combos, "Combos")}
+                {tab_btn(Tab::Pricer, "Price an option")}
+                {tab_btn(Tab::Surface, "Volatility map")}
+                {tab_btn(Tab::Combos, "Track a combination")}
             </div>
 
             {move || match tab.get() {
@@ -99,47 +105,100 @@ fn BsPricer() -> impl IntoView {
     });
 
     view! {
-        <div class="max-w-2xl space-y-8">
-            <div class="flex gap-2">
-                {[OptionType::Call, OptionType::Put].map(|t| {
-                    let label = t.label();
-                    view! {
-                        <button
-                            class=move || format!(
-                                "px-6 py-2 rounded text-sm font-medium border transition-colors {}",
-                                if opt_type.get() == t { "bg-blue-600 border-blue-600 text-white" }
-                                else { "bg-panel border-border text-gray-400 hover:border-gray-500" }
-                            )
-                            on:click=move |_| opt_type.set(t)
-                        >{label}</button>
-                    }
-                })}
+        <div class="max-w-2xl space-y-6">
+            <div class="space-y-2">
+                <div class="flex items-center gap-3">
+                    <span class="text-xs text-gray-400 font-sans">"Which kind of contract?"</span>
+                    <span class="flex items-center gap-1.5 text-xs text-gray-600 font-sans">
+                        "call" <Info term="call" /> "put" <Info term="put" />
+                    </span>
+                </div>
+                <div class="flex gap-2">
+                    {[OptionType::Call, OptionType::Put].map(|t| {
+                        let label = t.label();
+                        let sub = match t {
+                            OptionType::Call => "right to buy",
+                            OptionType::Put => "right to sell",
+                        };
+                        view! {
+                            <button
+                                class=move || format!(
+                                    "px-6 py-2 rounded text-sm font-medium border transition-colors text-left {}",
+                                    if opt_type.get() == t { "bg-blue-600 border-blue-600 text-white" }
+                                    else { "bg-panel border-border text-gray-400 hover:border-gray-500" }
+                                )
+                                on:click=move |_| opt_type.set(t)
+                            >
+                                {label}
+                                <span class="block text-[10px] opacity-70 font-sans font-normal">{sub}</span>
+                            </button>
+                        }
+                    })}
+                </div>
             </div>
 
             <div class="grid grid-cols-2 gap-4">
-                <InputField label="Spot (S)" signal=spot placeholder="100" />
-                <InputField label="Strike (K)" signal=strike placeholder="100" />
-                <InputField label="Volatility (%)" signal=vol placeholder="25" />
-                <InputField label="Risk-free rate (%)" signal=rate placeholder="3.75" />
-                <InputField label="Days to expiry" signal=expiry_days placeholder="30" />
+                <InputField label="Stock price today" term="spot" signal=spot placeholder="100" />
+                <InputField label="Strike price" term="strike" signal=strike placeholder="100" />
+                <InputField label="Expected swing (% a year)" term="volatility" signal=vol placeholder="25" />
+                <InputField label="Days until it expires" term="expiry" signal=expiry_days placeholder="30" />
             </div>
 
+            <Disclosure
+                summary="Advanced input"
+                detail="Interest rates barely move an option's value compared with the four fields \
+                        above. The default tracks short-term Treasury yields — leave it unless rates \
+                        have shifted a lot."
+            >
+                <div class="grid grid-cols-2 gap-4">
+                    <InputField label="Interest rate (%)" term="risk-free-rate" signal=rate placeholder="3.75" />
+                </div>
+            </Disclosure>
+
             {move || result.get().map(|r| view! {
-                <div class="bg-panel border border-border rounded-xl p-6 grid grid-cols-2 gap-4">
-                    <GreekRow label="Price"  value=format!("{:.4}", r.price) />
-                    <GreekRow label="Delta"  value=format!("{:.4}", r.delta) />
-                    <GreekRow label="Gamma"  value=format!("{:.4}", r.gamma) />
-                    <GreekRow label="Vega (per vol pt)" value=format!("{:.4}", r.vega) />
-                    <GreekRow label="Theta (per day)"   value=format!("{:.4}", r.theta) />
-                    <GreekRow label="Rho (per 1% rate)" value=format!("{:.4}", r.rho) />
+                <div class="bg-panel border border-blue-900 rounded-xl p-6 space-y-4">
+                    <div>
+                        <div class="flex items-center gap-1.5 mb-1">
+                            <span class="text-xs text-gray-400 font-sans">"What one contract is worth"</span>
+                            <Info term="premium" />
+                        </div>
+                        <p class="text-3xl font-semibold">{format!("${:.2}", r.price * 100.0)}</p>
+                        <p class="text-xs text-gray-500 mt-1 font-sans">
+                            {format!("${:.4} per share × 100 shares per contract", r.price)}
+                        </p>
+                    </div>
+
+                    <div class="border-t border-border pt-3">
+                        <Disclosure
+                            summary="What would change this price"
+                            detail="Each row is how much the per-share price moves when one thing \
+                                    changes and everything else stays put."
+                        >
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+                                <GreekRow label="If the stock rises $1" term="delta" value=format!("{:+.4}", r.delta) />
+                                <GreekRow label="How fast that shifts" term="gamma" value=format!("{:+.4}", r.gamma) />
+                                <GreekRow label="If swings rise 1 point" term="vega" value=format!("{:+.4}", r.vega) />
+                                <GreekRow label="Each day that passes" term="theta" value=format!("{:+.4}", r.theta) />
+                                <GreekRow label="If rates rise 1 point" term="rho" value=format!("{:+.4}", r.rho) />
+                            </div>
+                        </Disclosure>
+                    </div>
                 </div>
             })}
 
-            <div class="bg-panel border border-border rounded-xl p-6 space-y-4">
-                <h2 class="text-sm font-medium text-gray-300">"Implied Volatility Calculator"</h2>
+            <div class="bg-panel border border-border rounded-xl p-6 space-y-3">
+                <div class="flex items-center gap-1.5">
+                    <h2 class="text-sm font-medium text-gray-300 font-sans">"Work backwards from a real price"</h2>
+                    <Info term="implied-vol" />
+                </div>
+                <Hint>
+                    "If you know what the contract actually trades for, this tells you the expected \
+                     swing the market is pricing in — useful for judging whether an option looks \
+                     cheap or expensive."
+                </Hint>
                 <div class="flex gap-3 items-end">
                     <div class="flex-1">
-                        <label class="block text-xs text-gray-400 mb-1">"Market price"</label>
+                        <Label text="Price you were quoted (per share)" term=Some("premium") />
                         <input
                             class="w-full bg-surface border border-border rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
                             prop:value=move || market_price.get()
@@ -149,15 +208,22 @@ fn BsPricer() -> impl IntoView {
                     </div>
                 </div>
                 {move || iv.get().map(|v| view! {
-                    <p class="text-blue-300 text-sm">
-                        "Implied vol: " <span class="font-semibold">{format!("{:.2}%", v * 100.0)}</span>
+                    <p class="text-blue-300 text-sm font-sans">
+                        "The market is pricing in swings of about "
+                        <span class="font-semibold font-mono">{format!("{:.1}%", v * 100.0)}</span>
+                        " a year."
                     </p>
                 })}
                 {move || {
                     if market_price.get().trim().is_empty() {
                         None
                     } else if iv.get().is_none() {
-                        Some(view! { <p class="text-yellow-500 text-sm">"Could not converge — check inputs."</p> })
+                        Some(view! {
+                            <Callout tone=Tone::Warn>
+                                "No volatility can produce that price. It's usually below the contract's \
+                                 minimum possible value — check the strike, the stock price, and the days left."
+                            </Callout>
+                        })
                     } else {
                         None
                     }
@@ -200,9 +266,19 @@ fn VolSurfaceTab() -> impl IntoView {
 
     view! {
         <div class="space-y-4">
+            <div class="flex items-center gap-1.5">
+                <h2 class="text-sm font-medium text-gray-300 font-sans">"Volatility map"</h2>
+                <Info term="vol-surface" />
+            </div>
+            <Hint>
+                "The market doesn't expect the same size of swing for every strike and every expiry \
+                 on the same stock. This maps that out, so you can see which contracts are priced \
+                 richly relative to the rest."
+            </Hint>
+
             <div class="flex gap-2 items-end">
                 <div class="flex-1 max-w-xs">
-                    <label class="block text-xs text-gray-400 mb-1">"Symbol"</label>
+                    <Label text="Stock symbol" />
                     <input
                         class="w-full bg-surface border border-border rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
                         prop:value=move || symbol.get()
@@ -213,35 +289,36 @@ fn VolSurfaceTab() -> impl IntoView {
                 <button
                     class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
                     on:click=load
-                >"Load surface"</button>
+                >"Load map"</button>
             </div>
 
             <div class="bg-panel border border-border rounded-xl p-8 min-h-[280px] flex items-center justify-center text-center">
                 {move || match state.get() {
                     SurfaceState::Empty => view! {
-                        <p class="text-gray-500 text-sm">"Enter a symbol to load its volatility surface."</p>
+                        <p class="text-gray-500 text-sm font-sans max-w-sm">
+                            "Enter a stock symbol above to see its volatility map."
+                        </p>
                     }.into_any(),
                     SurfaceState::NotAvailable(sym) => view! {
-                        <div class="space-y-3">
-                            <p class="text-gray-400 text-sm">
-                                "No surface data for " <span class="font-semibold text-gray-200">{sym}</span> " yet."
+                        <div class="space-y-3 max-w-sm">
+                            <p class="text-gray-400 text-sm font-sans">
+                                "Nothing built for " <span class="font-semibold text-gray-200">{sym}</span>
+                                " yet. Building one pulls its full option chain and fits a curve through it."
                             </p>
                             <button
                                 class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
                                 on:click=build
-                            >"Build surface"</button>
-                            <p class="text-xs text-gray-600">"(placeholder — will call the compute backend)"</p>
+                            >"Build it"</button>
                         </div>
                     }.into_any(),
                     SurfaceState::Building(sym) => view! {
-                        <div class="space-y-2">
-                            <p class="text-blue-300 text-sm">
-                                "Build requested for " <span class="font-semibold">{sym}</span> "…"
-                            </p>
-                            <p class="text-xs text-gray-600">
-                                "The compute backend isn’t connected yet, so no surface will return. \
-                                 When it is, the 3D surface will render here and update as the job completes."
-                            </p>
+                        <div class="max-w-sm">
+                            <Callout>
+                                "Requested for " <span class="font-semibold">{sym}</span>
+                                ". This feature isn't finished — the calculation service behind it \
+                                 isn't connected yet, so nothing will come back. Everything else on \
+                                 this page works normally."
+                            </Callout>
                         </div>
                     }.into_any(),
                 }}
@@ -437,15 +514,22 @@ fn CombosTab() -> impl IntoView {
 
     view! {
         <div class="space-y-4">
-            <div class="flex items-center justify-between">
-                <p class="text-sm text-gray-400">
-                    "Track option combinations (e.g. a roll). Historical price/vol comes from the \
-                     market-data pipeline; sensitivities are computed live."
-                </p>
+            <div class="flex items-start justify-between gap-4">
+                <div class="space-y-1">
+                    <div class="flex items-center gap-1.5">
+                        <h2 class="text-sm font-medium text-gray-300 font-sans">"Track a combination"</h2>
+                        <Info term="combo" />
+                    </div>
+                    <Hint>
+                        "When you roll a covered call you're really doing two things at once — buying \
+                         back one contract and selling another. What matters is the net price of the \
+                         pair, not either leg on its own. Set the legs up here and track that number."
+                    </Hint>
+                </div>
                 <button
                     class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors shrink-0"
                     on:click=move |_| combos.update(|v| v.push(ComboTrack::new()))
-                >"+ Add combo"</button>
+                >"+ Add combination"</button>
             </div>
 
             {move || combos.get().into_iter().enumerate().map(|(i, c)| view! {
@@ -772,7 +856,7 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                         // ── Symbol + legs ─────────────────────────────────
                         <div class="flex gap-2 items-end">
                             <div class="w-32">
-                                <label class="block text-xs text-gray-400 mb-1">"Underlying"</label>
+                                <Label text="Stock symbol" />
                                 <input
                                     class="w-full bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
                                     prop:value=move || combo.symbol.get()
@@ -783,8 +867,16 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                         </div>
 
                         <div class="space-y-2">
-                            <div class="grid grid-cols-[auto_1fr_1fr_auto_auto] gap-2 text-xs text-gray-500">
-                                <span>"Type"</span><span>"Expiry"</span><span>"Strike"</span><span>"Qty"</span><span></span>
+                            <Hint>
+                                "One row per contract. Use a negative quantity for a contract you're \
+                                 selling — a roll is one negative row and one positive row."
+                            </Hint>
+                            <div class="grid grid-cols-[auto_1fr_1fr_auto_auto] gap-2 text-xs text-gray-500 font-sans">
+                                <span>"Type"</span>
+                                <span class="flex items-center gap-1">"Expires" <Info term="expiry" /></span>
+                                <span class="flex items-center gap-1">"Strike" <Info term="strike" /></span>
+                                <span class="flex items-center gap-1">"Qty" <Info term="contract" /></span>
+                                <span></span>
                             </div>
                             {move || combo.legs.get().into_iter().enumerate().map(|(i, leg)| view! {
                                 <div class="grid grid-cols-[auto_1fr_1fr_auto_auto] gap-2 items-center">
@@ -842,7 +934,7 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
 
                         // ── Metric toggle (applies to all plots) ──────────
                         <div class="flex items-center gap-2">
-                            <span class="text-xs text-gray-500">"Metric:"</span>
+                            <span class="text-xs text-gray-500 font-sans">"Chart the combination's"</span>
                             <div class="flex rounded overflow-hidden border border-border text-xs">
                                 <button type="button"
                                     class=move || if !combo.vol_mode.get() { "px-3 py-1 bg-blue-600 text-white" } else { "px-3 py-1 text-gray-400" }
@@ -856,10 +948,14 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                         </div>
 
                         // ── Sliders ───────────────────────────────────────
+                        <Hint>
+                            "Drag these to ask what-if. The charts below redraw against whatever you set here."
+                        </Hint>
                         <div class="grid grid-cols-3 gap-4 bg-surface border border-border rounded-lg p-3">
                             <div>
-                                <label class="block text-xs text-gray-400 mb-1">
-                                    "Spot " <span class="text-gray-200">{move || combo.spot.get()}</span>
+                                <label class="flex items-center gap-1 text-xs text-gray-400 mb-1 font-sans">
+                                    "Stock price" <Info term="spot" />
+                                    <span class="text-gray-200 font-mono">{move || combo.spot.get()}</span>
                                 </label>
                                 <input type="range"
                                     min=move || format!("{:.2}", (center.get() * 0.3).max(1.0))
@@ -871,8 +967,9 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                                 />
                             </div>
                             <div>
-                                <label class="block text-xs text-gray-400 mb-1">
-                                    "Vol " <span class="text-gray-200">{move || format!("{}%", combo.vol.get())}</span>
+                                <label class="flex items-center gap-1 text-xs text-gray-400 mb-1 font-sans">
+                                    "Expected swing" <Info term="volatility" />
+                                    <span class="text-gray-200 font-mono">{move || format!("{}%", combo.vol.get())}</span>
                                 </label>
                                 <input type="range" min="1" max="150" step="1" class="w-full"
                                     prop:value=move || combo.vol.get()
@@ -880,8 +977,9 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                                 />
                             </div>
                             <div>
-                                <label class="block text-xs text-gray-400 mb-1">
-                                    "Rate " <span class="text-gray-200">{move || format!("{}%", combo.rate.get())}</span>
+                                <label class="flex items-center gap-1 text-xs text-gray-400 mb-1 font-sans">
+                                    "Interest rate" <Info term="risk-free-rate" />
+                                    <span class="text-gray-200 font-mono">{move || format!("{}%", combo.rate.get())}</span>
                                 </label>
                                 <input type="range" min="0" max="12" step="0.25" class="w-full"
                                     prop:value=move || combo.rate.get()
@@ -893,17 +991,21 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                         // ── Sensitivity plots (Price metric only) ─────────
                         {move || if combo.vol_mode.get() {
                             view! {
-                                <p class="text-xs text-gray-500">
-                                    "Vol-mode sensitivity curves need the volatility surface (not available yet). \
-                                     The historical vol difference is shown below; switch Metric to Price for live sensitivities."
-                                </p>
+                                <Callout>
+                                    "What-if charts aren't available in volatility mode — they need the \
+                                     volatility map, which isn't built yet. The historical chart below \
+                                     still works. Switch back to Price for the what-if charts."
+                                </Callout>
                             }.into_any()
                         } else {
                             let (a, b, c, d) = (id_price.clone(), id_vol.clone(), id_rate.clone(), id_time.clone());
                             view! {
                                 <div>
                                     {move || legs_parsed.get().is_empty().then(|| view! {
-                                        <p class="text-xs text-gray-500">"Pick each leg’s expiry + strike to see sensitivity plots."</p>
+                                        <Hint>
+                                            "Choose an expiry and strike for each row above and the what-if \
+                                             charts will appear here."
+                                        </Hint>
                                     })}
                                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                         {plot_box(a.clone())}
@@ -921,11 +1023,15 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                                 <button
                                     class="bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded text-xs font-medium transition-colors"
                                     on:click=load_history
-                                >"Load history"</button>
+                                >"Show past prices"</button>
                                 {move || match combo.hist_status.get() {
-                                    HistStatus::Loading => view! { <span class="text-xs text-gray-400">"Loading…"</span> }.into_any(),
-                                    HistStatus::Empty   => view! { <span class="text-xs text-amber-400">"No history available yet for these legs."</span> }.into_any(),
-                                    HistStatus::Error(e) => view! { <span class="text-xs text-red-400">{e}</span> }.into_any(),
+                                    HistStatus::Loading => view! { <span class="text-xs text-gray-400 font-sans">"Loading…"</span> }.into_any(),
+                                    HistStatus::Empty   => view! {
+                                        <span class="text-xs text-amber-400 font-sans">
+                                            "No past prices recorded for these contracts yet."
+                                        </span>
+                                    }.into_any(),
+                                    HistStatus::Error(e) => view! { <span class="text-xs text-red-400 font-sans">{e}</span> }.into_any(),
                                     _ => ().into_any(),
                                 }}
                             </div>
@@ -950,10 +1056,15 @@ fn plot_box(id: String) -> impl IntoView {
 }
 
 #[component]
-fn InputField(label: &'static str, signal: RwSignal<String>, placeholder: &'static str) -> impl IntoView {
+fn InputField(
+    label: &'static str,
+    #[prop(optional)] term: Option<&'static str>,
+    signal: RwSignal<String>,
+    placeholder: &'static str,
+) -> impl IntoView {
     view! {
         <div>
-            <label class="block text-xs text-gray-400 mb-1">{label}</label>
+            <Label text=label term=term />
             <input
                 class="w-full bg-surface border border-border rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
                 prop:value=move || signal.get()
@@ -965,11 +1076,13 @@ fn InputField(label: &'static str, signal: RwSignal<String>, placeholder: &'stat
 }
 
 #[component]
-fn GreekRow(label: &'static str, value: String) -> impl IntoView {
+fn GreekRow(label: &'static str, term: &'static str, value: String) -> impl IntoView {
     view! {
-        <div class="flex justify-between items-center border-b border-border pb-2">
-            <span class="text-xs text-gray-400">{label}</span>
-            <span class="text-sm font-medium text-blue-200">{value}</span>
+        <div class="flex justify-between items-center border-b border-border py-2 gap-3">
+            <span class="flex items-center gap-1.5 text-xs text-gray-400 font-sans">
+                {label} <Info term=term />
+            </span>
+            <span class="text-sm font-medium text-blue-200 font-mono shrink-0">{value}</span>
         </div>
     }
 }

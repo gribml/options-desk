@@ -5,6 +5,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::supabase;
 use crate::app::AuthState;
+use crate::components::ui::{Callout, Hint, Info, Label};
 use crate::format::fmt_cash;
 use crate::models::tax::{
     DeductionChoice, FilingStatus, LineItemCategory, TaxEntryMode, TaxLineItem, TaxProfile,
@@ -66,9 +67,14 @@ pub fn TaxPage() -> impl IntoView {
 
     view! {
         <div class="space-y-6">
-            <div class="flex items-center justify-between">
-                <h1 class="text-lg font-semibold">"Taxes"</h1>
-                <div class="flex items-center gap-2">
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <h1 class="text-lg font-semibold">"Taxes"</h1>
+                    <p class="text-xs text-gray-500 mt-1 font-sans">
+                        "Your income for the year, so every estimate elsewhere can be a real number."
+                    </p>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
                     <input
                         class="w-24 bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
                         prop:value=move || new_year_input.get()
@@ -84,9 +90,17 @@ pub fn TaxPage() -> impl IntoView {
                 </div>
             </div>
 
-            <p class="text-xs text-gray-500">
-                "Enter your federal income profile for each tax year. Scenario and portfolio tax estimates use the latest values you save here."
-            </p>
+            <Callout>
+                "Tax rates aren't flat — what a sale costs you depends on everything else you earned \
+                 that year. Fill this in once and the Portfolio and Scenarios pages stop guessing: \
+                 they'll show the actual extra tax a trade would trigger, at your real marginal rate."
+            </Callout>
+
+            <Hint>
+                "Federal income tax only. State tax, the alternative minimum tax, wash-sale rules, and \
+                 the special treatment of index options aren't modelled. Estimates, not tax advice — \
+                 check anything that matters with your accountant."
+            </Hint>
 
             {move || loading.get().then(|| view! { <p class="text-sm text-gray-400">"Loading…"</p> })}
             {move || fetch_err.get().map(|e| view! { <p class="text-sm text-red-400">{e}</p> })}
@@ -298,75 +312,102 @@ fn YearSection(
             {move || expanded.get().then(|| view! {
                 <div class="px-4 pb-4 space-y-4 border-t border-border pt-4">
                     // ── Mode toggle ───────────────────────────────────────────
-                    <div class="flex rounded overflow-hidden border border-border text-xs w-fit">
-                        <button
-                            class=move || if mode.get() == TaxEntryMode::Snapshot {
-                                "px-3 py-1 bg-blue-600 text-white"
-                            } else {
-                                "px-3 py-1 text-gray-400 hover:text-gray-200 transition-colors"
-                            }
-                            on:click=move |_| switch_mode(TaxEntryMode::Snapshot)
-                        >"Snapshot"</button>
-                        <button
-                            class=move || if mode.get() == TaxEntryMode::LineItem {
-                                "px-3 py-1 bg-blue-600 text-white"
-                            } else {
-                                "px-3 py-1 text-gray-400 hover:text-gray-200 transition-colors"
-                            }
-                            on:click=move |_| switch_mode(TaxEntryMode::LineItem)
-                        >"Line items"</button>
+                    <div class="space-y-1.5">
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs text-gray-500 font-sans">"How do you want to enter this?"</span>
+                            <Info term="tax-line-items" />
+                        </div>
+                        <div class="flex rounded overflow-hidden border border-border text-xs w-fit">
+                            <button
+                                class=move || if mode.get() == TaxEntryMode::Snapshot {
+                                    "px-3 py-1 bg-blue-600 text-white"
+                                } else {
+                                    "px-3 py-1 text-gray-400 hover:text-gray-200 transition-colors"
+                                }
+                                on:click=move |_| switch_mode(TaxEntryMode::Snapshot)
+                            >"Totals for the year"</button>
+                            <button
+                                class=move || if mode.get() == TaxEntryMode::LineItem {
+                                    "px-3 py-1 bg-blue-600 text-white"
+                                } else {
+                                    "px-3 py-1 text-gray-400 hover:text-gray-200 transition-colors"
+                                }
+                                on:click=move |_| switch_mode(TaxEntryMode::LineItem)
+                            >"Log as I go"</button>
+                        </div>
                     </div>
 
                     {move || match mode.get() {
                         TaxEntryMode::Snapshot => view! {
-                            <div class="space-y-4">
-                                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                                    <div>
-                                        <label class="block text-xs text-gray-400 mb-1">"Filing status"</label>
-                                        <select
-                                            class=SELECT_CLS
-                                            prop:value=move || filing_status.get().as_str()
-                                            on:change=move |ev| {
-                                                if let Some(f) = FilingStatus::from_str(&event_target_value(&ev)) {
-                                                    filing_status.set(f);
+                            <div class="space-y-5">
+                                <div class="space-y-2">
+                                    <p class="text-xs font-medium text-gray-300 font-sans">"About you"</p>
+                                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                                        <div>
+                                            <Label text="Filing status" term=Some("filing-status") />
+                                            <select
+                                                class=SELECT_CLS
+                                                prop:value=move || filing_status.get().as_str()
+                                                on:change=move |ev| {
+                                                    if let Some(f) = FilingStatus::from_str(&event_target_value(&ev)) {
+                                                        filing_status.set(f);
+                                                    }
                                                 }
-                                            }
-                                        >
-                                            {FilingStatus::all().into_iter().map(|f| view! {
-                                                <option value=f.as_str()>{f.label()}</option>
-                                            }).collect_view()}
-                                        </select>
-                                    </div>
-                                    <MoneyField label="W-2 income" signal=w2 />
-                                    <MoneyField label="Interest income" signal=interest />
-                                    <MoneyField label="Non-qual dividends" signal=non_qual_div />
-                                    <MoneyField label="Qual dividends" signal=qual_div />
-                                    <MoneyField label="Rental income" signal=rental />
-                                    <MoneyField label="Short-term gains" signal=st_gains />
-                                    <MoneyField label="Long-term gains" signal=lt_gains />
-                                    <div>
-                                        <label class="block text-xs text-gray-400 mb-1">"Deduction"</label>
-                                        <select
-                                            class=SELECT_CLS
-                                            prop:value=move || deduction_choice.get().as_str()
-                                            on:change=move |ev| {
-                                                if let Some(d) = DeductionChoice::from_str(&event_target_value(&ev)) {
-                                                    deduction_choice.set(d);
+                                            >
+                                                {FilingStatus::all().into_iter().map(|f| view! {
+                                                    <option value=f.as_str()>{f.label()}</option>
+                                                }).collect_view()}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <Label text="Deduction" term=Some("standard-deduction") />
+                                            <select
+                                                class=SELECT_CLS
+                                                prop:value=move || deduction_choice.get().as_str()
+                                                on:change=move |ev| {
+                                                    if let Some(d) = DeductionChoice::from_str(&event_target_value(&ev)) {
+                                                        deduction_choice.set(d);
+                                                    }
                                                 }
-                                            }
-                                        >
-                                            <option value="standard">"Standard"</option>
-                                            <option value="itemized">"Itemized"</option>
-                                        </select>
+                                            >
+                                                <option value="standard">"Standard"</option>
+                                                <option value="itemized">"Itemised"</option>
+                                            </select>
+                                        </div>
+                                        {move || (deduction_choice.get() == DeductionChoice::Itemized).then(|| view! {
+                                            <MoneyField label="Itemised deductions" signal=itemized />
+                                        })}
                                     </div>
-                                    <MoneyField label="Itemized deductions" signal=itemized />
-                                    <MoneyField label="ST carryforward loss" signal=cf_st />
-                                    <MoneyField label="LT carryforward loss" signal=cf_lt />
                                 </div>
 
-                                <p class="text-xs text-gray-500">
-                                    "Non-qual dividends are taxed at ordinary rates; qual dividends at long-term rates. Enter each independently. Carryforward losses are entered as positive numbers."
-                                </p>
+                                <div class="space-y-2">
+                                    <p class="text-xs font-medium text-gray-300 font-sans">"Money coming in"</p>
+                                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                                        <MoneyField label="Salary (W-2)" signal=w2 />
+                                        <MoneyField label="Interest" signal=interest />
+                                        <MoneyField label="Rental income" signal=rental />
+                                        <MoneyField label="Dividends (ordinary)" term=Some("non-qualified-dividends") signal=non_qual_div />
+                                        <MoneyField label="Dividends (qualified)" term=Some("qualified-dividends") signal=qual_div />
+                                    </div>
+                                    <Hint>
+                                        "Your 1099-DIV splits dividends into these two buckets — they're \
+                                         taxed under completely different schedules, so enter each separately."
+                                    </Hint>
+                                </div>
+
+                                <div class="space-y-2">
+                                    <p class="text-xs font-medium text-gray-300 font-sans">"Investment gains already realised"</p>
+                                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                                        <MoneyField label="Held a year or less" term=Some("short-term-gain") signal=st_gains />
+                                        <MoneyField label="Held over a year" term=Some("long-term-gain") signal=lt_gains />
+                                        <MoneyField label="Losses carried forward (short)" term=Some("carryforward-loss") signal=cf_st />
+                                        <MoneyField label="Losses carried forward (long)" term=Some("carryforward-loss") signal=cf_lt />
+                                    </div>
+                                    <Hint>
+                                        "Gains you've already booked this year, not what you're still holding. \
+                                         Enter carried-forward losses as positive numbers."
+                                    </Hint>
+                                </div>
 
                                 {move || err.get().map(|e| view! { <p class="text-sm text-red-400">{e}</p> })}
 
@@ -484,10 +525,10 @@ fn LineItemModeView(
         <div class="space-y-6">
             // ── Personal settings ─────────────────────────────────────────────
             <div class="space-y-3">
-                <p class="text-xs font-medium text-gray-300">"Personal settings"</p>
+                <p class="text-xs font-medium text-gray-300 font-sans">"About you"</p>
                 <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
                     <div>
-                        <label class="block text-xs text-gray-400 mb-1">"Filing status"</label>
+                        <Label text="Filing status" term=Some("filing-status") />
                         <select
                             class=SELECT_CLS
                             prop:value=move || fs.get().as_str()
@@ -503,7 +544,7 @@ fn LineItemModeView(
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-gray-400 mb-1">"Deduction"</label>
+                        <Label text="Deduction" term=Some("standard-deduction") />
                         <select
                             class=SELECT_CLS
                             prop:value=move || dc.get().as_str()
@@ -517,8 +558,8 @@ fn LineItemModeView(
                             <option value="itemized">"Itemized"</option>
                         </select>
                     </div>
-                    <MoneyField label="ST carryforward loss" signal=cf_st_s />
-                    <MoneyField label="LT carryforward loss" signal=cf_lt_s />
+                    <MoneyField label="Losses carried forward (short)" term=Some("carryforward-loss") signal=cf_st_s />
+                    <MoneyField label="Losses carried forward (long)" term=Some("carryforward-loss") signal=cf_lt_s />
                 </div>
                 {move || settings_err.get().map(|e| view! { <p class="text-xs text-red-400">{e}</p> })}
                 <button
@@ -584,7 +625,11 @@ fn AddLineItemRow(#[prop(into)] on_add: Callback<TaxLineItem>) -> impl IntoView 
 
     view! {
         <div class="space-y-2">
-            <p class="text-xs font-medium text-gray-300">"Add line item"</p>
+            <p class="text-xs font-medium text-gray-300 font-sans">"Add an entry"</p>
+            <Hint>
+                "Log each amount as it lands — a paycheck, a dividend, a realised gain. The totals \
+                 build up underneath and feed every estimate elsewhere."
+            </Hint>
             <div class="flex flex-wrap gap-2 items-end">
                 <div>
                     <label class="block text-xs text-gray-400 mb-1">"Category"</label>
@@ -653,7 +698,9 @@ fn LineItemsList(
             let items = line_items.get();
             if items.is_empty() {
                 return view! {
-                    <p class="text-xs text-gray-500 italic">"No line items yet."</p>
+                    <p class="text-xs text-gray-500 italic font-sans">
+                        "Nothing logged for this year yet — add your first entry above."
+                    </p>
                 }.into_any();
             }
 
@@ -751,7 +798,7 @@ fn RevisionHistory(
                         class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
                         on:click=move |_| show_history.update(|v| *v = !*v)
                     >
-                        {move || if show_history.get() { "▾ Hide history" } else { "▸ Edit history" }}
+                        {move || if show_history.get() { "▾ Hide earlier versions" } else { "▸ Earlier versions of this year" }}
                     </button>
                     {move || show_history.get().then(|| view! {
                         <div class="mt-2 space-y-2">
@@ -838,10 +885,14 @@ fn money_str(v: f64) -> String {
 }
 
 #[component]
-fn MoneyField(label: &'static str, signal: RwSignal<String>) -> impl IntoView {
+fn MoneyField(
+    label: &'static str,
+    #[prop(optional_no_strip)] term: Option<&'static str>,
+    signal: RwSignal<String>,
+) -> impl IntoView {
     view! {
         <div>
-            <label class="block text-xs text-gray-400 mb-1">{label}</label>
+            <Label text=label term=term />
             <input
                 class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
                 prop:value=move || signal.get()

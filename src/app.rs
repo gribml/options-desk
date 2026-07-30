@@ -154,8 +154,9 @@ fn Redirect() -> impl IntoView {
 fn NotFound() -> impl IntoView {
     view! {
         <div class="text-center mt-32 text-gray-400">
-            <p class="text-4xl mb-4">"404"</p>
-            <A href="/" attr:class="text-blue-400 hover:underline">"Go home"</A>
+            <p class="text-4xl mb-2">"404"</p>
+            <p class="text-sm mb-4 font-sans">"There's nothing at this address."</p>
+            <A href="/" attr:class="text-blue-400 hover:underline">"Back to your portfolio"</A>
         </div>
     }
 }

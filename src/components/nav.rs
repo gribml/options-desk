@@ -15,10 +15,18 @@ pub fn Nav() -> impl IntoView {
                     <a href="/" class="font-semibold text-sm tracking-tight hover:text-white transition-colors">"Martingale"</a>
                     <Show when=move || auth.is_authenticated()>
                         <div class="flex gap-4">
-                            <NavLink href="/app/portfolio">"Portfolio"</NavLink>
-                            <NavLink href="/app/pricer">"Pricer"</NavLink>
-                            <NavLink href="/app/scenarios">"Scenarios"</NavLink>
-                            <NavLink href="/app/tax">"Taxes"</NavLink>
+                            <NavLink href="/app/portfolio" title="What you own and what it's worth">
+                                "Portfolio"
+                            </NavLink>
+                            <NavLink href="/app/scenarios" title="Try a trade on paper before you place it">
+                                "Scenarios"
+                            </NavLink>
+                            <NavLink href="/app/pricer" title="Work out what an option contract is worth">
+                                "Pricer"
+                            </NavLink>
+                            <NavLink href="/app/tax" title="Your income, so tax estimates are real numbers">
+                                "Taxes"
+                            </NavLink>
                         </div>
                     </Show>
                 </div>
@@ -40,9 +48,13 @@ pub fn Nav() -> impl IntoView {
 }
 
 #[component]
-fn NavLink(href: &'static str, children: Children) -> impl IntoView {
+fn NavLink(href: &'static str, title: &'static str, children: Children) -> impl IntoView {
     view! {
-        <A href=href attr:class="text-xs text-gray-400 hover:text-gray-100 transition-colors">
+        <A
+            href=href
+            attr:class="text-xs text-gray-400 hover:text-gray-100 transition-colors"
+            attr:title=title
+        >
             {children()}
         </A>
     }

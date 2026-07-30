@@ -4,6 +4,7 @@ mod config;
 mod api;
 mod components;
 pub mod format;
+mod glossary;
 mod models;
 mod pages;
 mod pricing;

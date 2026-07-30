@@ -8,6 +8,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
 use crate::app::AuthState;
+use crate::components::ui::{Callout, Disclosure, EmptyState, Hint, Info, Stat, Tone};
 use crate::format::{fmt_cash, Num};
 use crate::models::market::{LatestBar, OptionMetaEntry};
 use crate::store::MarketStore;
@@ -383,10 +384,15 @@ pub fn PortfolioPage() -> impl IntoView {
         <div class="space-y-6">
 
             // ── Header ─────────────────────────────────────────────────────
-            <div class="flex items-center justify-between">
-                <h1 class="text-xl font-semibold">"Portfolio"</h1>
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <h1 class="text-xl font-semibold">"Portfolio"</h1>
+                    <p class="text-xs text-gray-500 mt-1 font-sans">
+                        "Everything you hold, what it's worth today, and what selling it would cost you in tax."
+                    </p>
+                </div>
                 <button
-                    class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
+                    class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors shrink-0"
                     on:click=move |_| show_add.update(|v| *v = !*v)
                 >
                     {move || if show_add.get() { "Cancel" } else { "+ Add position" }}
@@ -425,35 +431,26 @@ pub fn PortfolioPage() -> impl IntoView {
             {move || error.get().map(|e| view! { <p class="text-red-400 text-sm">{e}</p> })}
             {move || loading.get().then(|| view! { <p class="text-gray-400 text-sm">"Loading…"</p> })}
 
-            // ── Market inputs (per symbol) ──────────────────────────────────
-            {move || {
-                let ps = positions.get();
-                if ps.is_empty() { return None; }
-                let mut seen = HashSet::new();
-                let syms: Vec<String> = ps
-                    .iter()
-                    .filter(|p| seen.insert(p.symbol.clone()))
-                    .map(|p| p.symbol.clone())
-                    .collect();
-                Some(view! {
-                    <MarketInputsPanel
-                        symbols=syms
-                        market_data=market_data
-                        quote_loading=quote_loading
-                        quote_errors=quote_errors
-                        on_refresh_quotes=move || refresh_quotes()
-                    />
-                })
-            }}
-
             // ── Portfolio summary ───────────────────────────────────────────
             {move || summary.get().has_data.then(|| view! {
                 <SummaryCard summary=summary.get() />
             })}
 
             // ── Position rows ───────────────────────────────────────────────
-            {move || (!loading.get() && positions.get().is_empty()).then(|| view! {
-                <p class="text-gray-500 text-sm">"No positions yet. Add one above."</p>
+            {move || (!loading.get() && positions.get().is_empty() && !show_add.get()).then(|| view! {
+                <EmptyState
+                    title="Start with what you own"
+                    body="Add a stock you hold and Martingale pulls the live price, works out your gain, \
+                          and shows what selling it today would cost you in federal tax. Once a holding \
+                          is here you can model covered calls and rolls against it."
+                >
+                    <button
+                        class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
+                        on:click=move |_| show_add.set(true)
+                    >
+                        "Add my first holding"
+                    </button>
+                </EmptyState>
             })}
 
             <div class="space-y-2">
@@ -489,6 +486,27 @@ pub fn PortfolioPage() -> impl IntoView {
                         .collect_view()
                 }}
             </div>
+
+            // ── Assumptions behind the numbers ──────────────────────────────
+            {move || {
+                let ps = positions.get();
+                if ps.is_empty() { return None; }
+                let mut seen = HashSet::new();
+                let syms: Vec<String> = ps
+                    .iter()
+                    .filter(|p| seen.insert(p.symbol.clone()))
+                    .map(|p| p.symbol.clone())
+                    .collect();
+                Some(view! {
+                    <MarketInputsPanel
+                        symbols=syms
+                        market_data=market_data
+                        quote_loading=quote_loading
+                        quote_errors=quote_errors
+                        on_refresh_quotes=move |_| refresh_quotes()
+                    />
+                })
+            }}
         </div>
     }
 }
@@ -501,37 +519,49 @@ fn MarketInputsPanel(
     market_data: RwSignal<HashMap<String, MarketData>>,
     quote_loading: RwSignal<bool>,
     quote_errors: RwSignal<HashSet<String>>,
-    on_refresh_quotes: impl Fn() + 'static,
+    #[prop(into)] on_refresh_quotes: Callback<()>,
 ) -> impl IntoView {
     view! {
-        <div class="bg-panel border border-border rounded-xl p-4 space-y-3">
-            <div class="flex items-center justify-between">
-                <p class="text-xs font-medium text-gray-400 uppercase tracking-wider">"Market Inputs"</p>
-                <button
-                    class="text-xs text-gray-500 hover:text-blue-300 disabled:opacity-40 transition-colors"
-                    prop:disabled=move || quote_loading.get()
-                    on:click=move |_| on_refresh_quotes()
-                >
-                    {move || if quote_loading.get() { "Refreshing…" } else { "↻ Refresh quotes" }}
-                </button>
-            </div>
+        <div class="bg-panel border border-border rounded-xl p-4">
+            <Disclosure
+                summary="Assumptions behind these numbers"
+                detail="Prices come from live quotes. Change any of them to see what your holdings \
+                        would look like at a different price — nothing here is saved, and your \
+                        cost basis is untouched. Use the arrow keys in a field to nudge it."
+            >
+                <div class="space-y-3">
+                    <div class="flex items-center justify-end">
+                        <button
+                            class="text-xs text-gray-500 hover:text-blue-300 disabled:opacity-40 transition-colors font-sans"
+                            prop:disabled=move || quote_loading.get()
+                            on:click=move |_| on_refresh_quotes.run(())
+                        >
+                            {move || if quote_loading.get() { "Refreshing…" } else { "↻ Refresh quotes" }}
+                        </button>
+                    </div>
 
-            // Live-data failure notice — the price fields below are editable.
-            {move || (!quote_errors.get().is_empty()).then(|| view! {
-                <p class="text-xs text-amber-400 bg-amber-950/40 border border-amber-900 rounded px-2 py-1.5">
-                    "⚠ Couldn’t load live prices for "
-                    {let mut s: Vec<String> = quote_errors.get().into_iter().collect(); s.sort(); s.join(", ")}
-                    ". Enter prices manually below."
-                </p>
-            })}
+                    // Live-data failure notice — the price fields below are editable.
+                    {move || (!quote_errors.get().is_empty()).then(|| view! {
+                        <Callout tone=Tone::Warn>
+                            "Couldn’t load live prices for "
+                            {let mut s: Vec<String> = quote_errors.get().into_iter().collect(); s.sort(); s.join(", ")}
+                            ". Type the current price in below and everything else will recalculate."
+                        </Callout>
+                    })}
 
             <div class="grid grid-cols-[auto_1fr_1fr_1fr] gap-x-4 gap-y-2 items-center">
-                <span class="text-xs text-gray-500">"Symbol"</span>
-                <span class="text-xs text-gray-500">"Price"</span>
-                <span class="text-xs text-gray-500">"IV %"</span>
-                <span class="text-xs text-gray-500">"Rate %"</span>
+                <span class="text-xs text-gray-500 font-sans">"Symbol"</span>
+                <span class="flex items-center gap-1.5 text-xs text-gray-500 font-sans">
+                    "Price" <Info term="spot" />
+                </span>
+                <span class="flex items-center gap-1.5 text-xs text-gray-500 font-sans">
+                    "Volatility %" <Info term="implied-vol" />
+                </span>
+                <span class="flex items-center gap-1.5 text-xs text-gray-500 font-sans">
+                    "Rate %" <Info term="risk-free-rate" align_end=true />
+                </span>
 
-                {symbols.into_iter().map(|sym| {
+                {symbols.iter().cloned().map(|sym| {
                     let (sp, sv, sr, sc) = (sym.clone(), sym.clone(), sym.clone(), sym.clone());
                     let (wp, wv, wr) = (sym.clone(), sym.clone(), sym.clone());
                     let (kp, kv, kr) = (sym.clone(), sym.clone(), sym.clone());
@@ -641,6 +671,8 @@ fn MarketInputsPanel(
                     }
                 }).collect_view()}
             </div>
+                </div>
+            </Disclosure>
         </div>
     }
 }
@@ -653,34 +685,53 @@ fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
 
     view! {
         <div class="bg-panel border border-blue-900 rounded-xl p-6 space-y-4">
-            <div class="flex items-start justify-between">
-                <div>
-                    <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">"Portfolio Value"</p>
-                    <p class="text-3xl font-semibold">
-                        <Num value=summary.total_value />
-                    </p>
-                </div>
+            <div class="flex items-start justify-between gap-4">
+                <Stat
+                    label="What it's all worth"
+                    term="market-value"
+                    value_class="text-3xl font-semibold"
+                >
+                    <Num value=summary.total_value />
+                </Stat>
                 <div class="text-right">
-                    <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">"Unrealised P&L"</p>
+                    <div class="flex items-center justify-end gap-1.5 mb-1">
+                        <span class="text-xs text-gray-400 font-sans">"Gain if you sold today"</span>
+                        <Info term="unrealised-pnl" />
+                    </div>
                     <p class=format!("text-2xl font-semibold {}", pnl_class)>
                         <Num value=summary.total_pnl signed=true />
                     </p>
+                    <p class="text-[11px] text-gray-600 font-sans mt-0.5">"before tax"</p>
                 </div>
             </div>
 
-            <div class="border-t border-border pt-4 grid grid-cols-5 gap-3">
-                <GreekStat label="Delta"  value=summary.net_delta   fmt="{:.1}" />
-                <GreekStat label="Gamma"  value=summary.net_gamma   fmt="{:.4}" />
-                <GreekStat label="Vega"   value=summary.net_vega    fmt="${:.2}" />
-                <GreekStat label="Theta"  value=summary.net_theta   fmt="${:.2}" />
-                <GreekStat label="Rho"    value=summary.net_rho     fmt="${:.2}" />
+            <div class="border-t border-border pt-3">
+                <Disclosure
+                    summary="What moves this portfolio"
+                    detail="These describe what your holdings actually react to. Delta is the one \
+                            most people want: it's roughly the dollar change for a $1 move in the \
+                            underlying stock."
+                >
+                    <div class="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                        <GreekStat label="Per $1 move" term="delta" value=summary.net_delta fmt="{:.1}" />
+                        <GreekStat label="Change in that" term="gamma" value=summary.net_gamma fmt="{:.4}" />
+                        <GreekStat label="Per 1% vol" term="vega" value=summary.net_vega fmt="${:.2}" />
+                        <GreekStat label="Per day" term="theta" value=summary.net_theta fmt="${:.2}" />
+                        <GreekStat label="Per 1% rate" term="rho" value=summary.net_rho fmt="${:.2}" />
+                    </div>
+                </Disclosure>
             </div>
         </div>
     }
 }
 
 #[component]
-fn GreekStat(label: &'static str, value: f64, fmt: &'static str) -> impl IntoView {
+fn GreekStat(
+    label: &'static str,
+    term: &'static str,
+    value: f64,
+    fmt: &'static str,
+) -> impl IntoView {
     let display = if fmt.starts_with('$') {
         fmt_cash(value)
     } else if fmt.contains(".4") {
@@ -691,7 +742,10 @@ fn GreekStat(label: &'static str, value: f64, fmt: &'static str) -> impl IntoVie
     let cls = if value >= 0.0 { "text-green-300" } else { "text-red-300" };
     view! {
         <div class="text-center">
-            <p class="text-xs text-gray-500 mb-1">{label}</p>
+            <div class="flex items-center justify-center gap-1 mb-1">
+                <span class="text-xs text-gray-500 font-sans">{label}</span>
+                <Info term=term />
+            </div>
             <p class=format!("text-sm font-mono font-medium {}", cls)>{display}</p>
         </div>
     }
@@ -720,6 +774,37 @@ fn PositionRow(
         }).unwrap_or_else(|| "Option".to_string()),
     };
 
+    // Spell the position out in a sentence — "sold 4 call contracts" beats "-4".
+    let eff_qty_for_plain = position.effective_quantity();
+    let plain_label = match &position.kind {
+        PositionKind::Stock => format!(
+            "{} {} shares",
+            if eff_qty_for_plain >= 0 { "Holding" } else { "Short" },
+            eff_qty_for_plain.abs()
+        ),
+        PositionKind::Option => position.option_spec.as_ref().map(|s| {
+            let verb = if eff_qty_for_plain >= 0 { "Bought" } else { "Sold" };
+            let n = eff_qty_for_plain.unsigned_abs();
+            format!(
+                "{} {} {} contract{} — the right to {} {} shares at ${:.0} until {}",
+                verb, n,
+                s.option_type.label().to_lowercase(),
+                if n == 1 { "" } else { "s" },
+                match s.option_type { OptionType::Call => "buy", OptionType::Put => "sell" },
+                n * 100,
+                s.strike,
+                s.expiry.format("%-d %b %Y"),
+            )
+        }).unwrap_or_default(),
+    };
+    let term_for_kind = match &position.kind {
+        PositionKind::Stock => None,
+        PositionKind::Option => position.option_spec.as_ref().map(|s| match s.option_type {
+            OptionType::Call => "call",
+            OptionType::Put => "put",
+        }),
+    };
+
     let eff_qty = position.effective_quantity();
     let eff_cb  = position.effective_cost_basis();
     let qty_class = if eff_qty >= 0 { "text-green-400" } else { "text-red-400" };
@@ -745,12 +830,16 @@ fn PositionRow(
                     <span class=format!("text-sm font-mono shrink-0 {}", qty_class)>
                         {format!("{:+}", eff_qty)}
                     </span>
-                    <span class="text-xs text-gray-500 shrink-0">
-                        "cost " {format!("${:.2}", eff_cb)}
+                    <span class="text-xs text-gray-500 shrink-0 inline-flex items-center gap-1 font-sans">
+                        "paid " <Info term="cost-basis" />
+                        <span class="font-mono">{format!("${:.2}", eff_cb)}</span>
                     </span>
                 </div>
                 <div class="flex items-center gap-4 shrink-0">
-                    <span class="text-xs text-gray-400">"mark " {mark_str}</span>
+                    <span class="text-xs text-gray-400 inline-flex items-center gap-1 font-sans">
+                        "now " <Info term="mark-price" />
+                        <span class="font-mono">{mark_str}</span>
+                    </span>
                     <span class="text-sm font-medium">
                         {match mark_value {
                             Some(v) => view! { <Num value=v /> }.into_any(),
@@ -772,16 +861,22 @@ fn PositionRow(
                 </div>
             </div>
 
-            // Cost basis + implied tax row
-            <div class="flex gap-6 pl-14 text-xs text-gray-500">
-                <span>
-                    "cost "
+            // Plain-English restatement of the position
+            <div class="pl-14 flex items-center gap-1.5">
+                <span class="text-xs text-gray-500 font-sans">{plain_label}</span>
+                {term_for_kind.map(|t| view! { <Info term=t /> })}
+            </div>
+
+            // What it cost, and what leaving would cost
+            <div class="flex flex-wrap gap-x-6 gap-y-1 pl-14 text-xs text-gray-500 font-sans">
+                <span class="flex items-center gap-1.5">
+                    "Total paid " <Info term="cost-basis" />
                     <span class={if total_cost >= 0.0 { "text-gray-300" } else { "text-green-400" }}>
                         {fmt_cash(total_cost)}
                     </span>
                 </span>
-                <span>
-                    "~tax "
+                <span class="flex items-center gap-1.5">
+                    "Tax if sold today " <Info term="implied-tax" />
                     {move || match implied_tax.get().get(&pid).copied() {
                         Some(t) if t > 0.0 => view! {
                             <span class="text-orange-300">{fmt_cash(-t)}</span>
@@ -791,18 +886,36 @@ fn PositionRow(
                 </span>
             </div>
 
-            // Greeks row — delta for all positions, full Greeks for options
+            // Sensitivities — collapsed; most rows never need them open.
             {metrics.as_ref().map(|m| {
                 let (d, g, v, t, r) = (m.delta, m.gamma, m.vega, m.theta, m.rho);
                 view! {
-                    <div class="flex gap-4 pl-14 text-xs font-mono text-gray-400">
-                        <span>"Δ " <GreekVal v=d fmt="f1" /></span>
-                        {is_option.then(|| view! {
-                            <span>"Γ " <GreekVal v=g fmt="f4" /></span>
-                            <span>"ν " <GreekVal v=v fmt="$" /></span>
-                            <span>"θ " <GreekVal v=t fmt="$" /></span>
-                            <span>"ρ " <GreekVal v=r fmt="$" /></span>
-                        })}
+                    <div class="pl-14">
+                        <Disclosure
+                            summary="What moves this position"
+                            detail="Each number is the dollar change in this position for a one-unit \
+                                    move in the thing named."
+                        >
+                            <div class="flex flex-wrap gap-x-5 gap-y-1 text-xs font-mono text-gray-400">
+                                <span class="inline-flex items-center gap-1">
+                                    "Per $1 move " <Info term="delta" /> <GreekVal v=d fmt="f1" />
+                                </span>
+                                {is_option.then(|| view! {
+                                    <span class="inline-flex items-center gap-1">
+                                        "Change in that " <Info term="gamma" /> <GreekVal v=g fmt="f4" />
+                                    </span>
+                                    <span class="inline-flex items-center gap-1">
+                                        "Per 1% vol " <Info term="vega" /> <GreekVal v=v fmt="$" />
+                                    </span>
+                                    <span class="inline-flex items-center gap-1">
+                                        "Per day " <Info term="theta" /> <GreekVal v=t fmt="$" />
+                                    </span>
+                                    <span class="inline-flex items-center gap-1">
+                                        "Per 1% rate " <Info term="rho" /> <GreekVal v=r fmt="$" />
+                                    </span>
+                                })}
+                            </div>
+                        </Disclosure>
                     </div>
                 }
             })}
@@ -813,10 +926,14 @@ fn PositionRow(
                 view! {
                     <div>
                         <button
-                            class="text-xs text-gray-500 hover:text-gray-300 transition-colors pl-14"
+                            class="text-xs text-gray-500 hover:text-gray-300 transition-colors pl-14 font-sans"
                             on:click=move |_| show_trades.update(|v| *v = !*v)
                         >
-                            {move || if show_trades.get() { "▾ trades" } else { "▸ trades" }}
+                            {move || if show_trades.get() {
+                                "▾ Individual purchases and sales"
+                            } else {
+                                "▸ Individual purchases and sales"
+                            }}
                         </button>
                         {move || show_trades.get().then(|| view! {
                             <TradeLogPanel
@@ -1236,29 +1353,38 @@ fn AddPositionForm(
             </div>
 
             // Entry mode toggle
-            <div class="flex items-center gap-2 text-xs">
-                <span class="text-gray-500">"Entry:"</span>
-                <div class="flex rounded overflow-hidden border border-border">
-                    <button type="button"
-                        class=move || if entry_mode.get() == PositionEntryMode::Snapshot {
-                            "px-2 py-0.5 bg-blue-600 text-white"
-                        } else {
-                            "px-2 py-0.5 text-gray-400 hover:text-gray-200"
-                        }
-                        on:click=move |_| entry_mode.set(PositionEntryMode::Snapshot)
-                    >"Snapshot"</button>
-                    <button type="button"
-                        class=move || if entry_mode.get() == PositionEntryMode::TradeLog {
-                            "px-2 py-0.5 bg-blue-600 text-white"
-                        } else {
-                            "px-2 py-0.5 text-gray-400 hover:text-gray-200"
-                        }
-                        on:click=move |_| entry_mode.set(PositionEntryMode::TradeLog)
-                    >"Trade log"</button>
+            <div class="space-y-1.5">
+                <div class="flex items-center gap-2 text-xs">
+                    <span class="text-gray-500 font-sans">"How do you want to enter it?"</span>
+                    <div class="flex rounded overflow-hidden border border-border">
+                        <button type="button"
+                            class=move || if entry_mode.get() == PositionEntryMode::Snapshot {
+                                "px-2 py-0.5 bg-blue-600 text-white"
+                            } else {
+                                "px-2 py-0.5 text-gray-400 hover:text-gray-200"
+                            }
+                            on:click=move |_| entry_mode.set(PositionEntryMode::Snapshot)
+                        >"One total"</button>
+                        <button type="button"
+                            class=move || if entry_mode.get() == PositionEntryMode::TradeLog {
+                                "px-2 py-0.5 bg-blue-600 text-white"
+                            } else {
+                                "px-2 py-0.5 text-gray-400 hover:text-gray-200"
+                            }
+                            on:click=move |_| entry_mode.set(PositionEntryMode::TradeLog)
+                        >"Purchase by purchase"</button>
+                    </div>
                 </div>
-                {move || (entry_mode.get() == PositionEntryMode::TradeLog).then(|| view! {
-                    <span class="text-gray-600 italic">"Add trades after creating."</span>
-                })}
+                <Hint>
+                    {move || if entry_mode.get() == PositionEntryMode::TradeLog {
+                        "You'll add each buy and sell after creating this, with its own date and price. \
+                         Slower, but it tracks holding periods properly — which is what decides whether \
+                         a gain is taxed at the long-term rate."
+                    } else {
+                        "Enter one quantity and one average price. Quick, but Martingale can't tell \
+                         which shares are long-term, so tax estimates are rougher."
+                    }}
+                </Hint>
             </div>
 
             <div class="grid grid-cols-2 gap-3">

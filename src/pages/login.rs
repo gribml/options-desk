@@ -47,11 +47,14 @@ pub fn LoginPage() -> impl IntoView {
     view! {
         <div class="min-h-[80vh] flex items-center justify-center">
             <div class="bg-panel border border-border rounded-xl p-8 w-full max-w-sm">
-                <h1 class="text-2xl font-semibold mb-6 text-center">"Martingale"</h1>
+                <h1 class="text-2xl font-semibold mb-1 text-center">"Martingale"</h1>
+                <p class="text-xs text-gray-500 mb-6 text-center font-sans leading-relaxed">
+                    "Track what you own, try trades on paper, and see the tax before you commit."
+                </p>
 
                 <form on:submit=on_submit class="space-y-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">"Email"</label>
+                        <label class="block text-sm text-gray-400 mb-1 font-sans">"Email"</label>
                         <input
                             type="email"
                             class="w-full bg-surface border border-border rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
@@ -61,7 +64,7 @@ pub fn LoginPage() -> impl IntoView {
                         />
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-1">"Password"</label>
+                        <label class="block text-sm text-gray-400 mb-1 font-sans">"Password"</label>
                         <input
                             type="password"
                             class="w-full bg-surface border border-border rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"

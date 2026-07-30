@@ -8,6 +8,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
 use crate::app::AuthState;
+use crate::components::ui::{Disclosure, EmptyState, Hint, Info, Label};
 use crate::models::market::{OptionChainEntry, OptionMetaEntry};
 use crate::store::MarketStore;
 use crate::models::{
@@ -367,10 +368,16 @@ pub fn ScenariosPage() -> impl IntoView {
 
     view! {
         <div class="space-y-6">
-            <div class="flex items-center justify-between">
-                <h1 class="text-xl font-semibold">"Scenarios"</h1>
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <h1 class="text-xl font-semibold">"Scenarios"</h1>
+                    <p class="text-xs text-gray-500 mt-1 font-sans">
+                        "Try a trade on paper first. Name a price, name a date, and see the cash, \
+                         the tax, and what changes about your risk."
+                    </p>
+                </div>
                 <button
-                    class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
+                    class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors shrink-0"
                     on:click=move |_| {
                         editing_id.set(None);
                         show_new.update(|v| *v = !*v);
@@ -408,8 +415,32 @@ pub fn ScenariosPage() -> impl IntoView {
                 let ps = positions.get();
                 let eid = editing_id.get();
                 let active: Vec<_> = ss.into_iter().filter(|s| !s.archived).collect();
-                if !loading.get() && active.is_empty() && fetch_err.get().is_none() {
-                    view! { <p class="text-gray-500 text-sm">"No scenarios yet. Create one above."</p> }.into_any()
+                if !loading.get() && active.is_empty() && fetch_err.get().is_none() && !show_new.get() {
+                    let has_positions = !ps.is_empty();
+                    view! {
+                        <EmptyState
+                            title="Ask a what-if question"
+                            body="A scenario is a guess about the future you can price out: \"what if \
+                                  the stock is at $260 in September and I sell a call against it?\" \
+                                  Martingale works out the cash you'd collect, the tax you'd owe, and \
+                                  whether your shares get called away."
+                        >
+                            <button
+                                class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
+                                on:click=move |_| { editing_id.set(None); show_new.set(true); }
+                            >
+                                "Build my first scenario"
+                            </button>
+                            {(!has_positions).then(|| view! {
+                                <a
+                                    href=format!("{}/portfolio", crate::config::APP_BASE)
+                                    class="px-4 py-2 rounded text-sm font-medium border border-border text-gray-300 hover:border-gray-500 transition-colors"
+                                >
+                                    "Add a holding first"
+                                </a>
+                            })}
+                        </EmptyState>
+                    }.into_any()
                 } else {
                     active.into_iter().map(|s| {
                         let id = s.id;
@@ -746,14 +777,25 @@ fn ScenarioForm(
             </div>
 
             <div class="grid grid-cols-2 gap-3">
-                <FormInput label="Name" signal=name ph="e.g. Roll AAPL puts to June" />
-                <FormInput label="Evaluation date (YYYY-MM-DD)" signal=eval_date ph="2025-06-20" />
+                <FormInput label="Call it something" signal=name ph="e.g. Roll AAPL calls to June" />
+                <FormInput label="Date you're imagining" term=Some("evaluation-date") signal=eval_date ph="2025-06-20" />
             </div>
 
             <div class="space-y-2">
-                <p class="text-xs font-medium text-gray-400 uppercase tracking-wider">"Market inputs"</p>
-                <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto_auto] gap-2 items-center text-xs text-gray-500">
-                    <span>"Symbol"</span><span>"Price"</span><span>"IV %"</span><span>"Rate %"</span><span/><span/>
+                <div class="flex items-center gap-1.5">
+                    <p class="text-xs font-medium text-gray-300 font-sans">"Step 1 — where is the stock?"</p>
+                </div>
+                <Hint>
+                    "Put in the price you want to test. The ↗ button fills in today's real price and \
+                     the market's current expectation of swings, which is a sensible starting point \
+                     to nudge up or down from."
+                </Hint>
+                <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto_auto] gap-2 items-center text-xs text-gray-500 font-sans">
+                    <span>"Symbol"</span>
+                    <span class="flex items-center gap-1">"Price" <Info term="spot" /></span>
+                    <span class="flex items-center gap-1">"Swing %" <Info term="implied-vol" /></span>
+                    <span class="flex items-center gap-1">"Rate %" <Info term="risk-free-rate" align_end=true /></span>
+                    <span/><span/>
                 </div>
                 {move || market_entries.get().into_iter().enumerate().map(|(i, me)| {
                     let me_fill = me.clone();
@@ -848,13 +890,18 @@ fn ScenarioForm(
                         </div>
                     }
                 }).collect_view()}
-                <button type="button" class="text-xs text-blue-400 hover:text-blue-300" on:click=add_market>
-                    "+ add symbol"
+                <button type="button" class="text-xs text-blue-400 hover:text-blue-300 font-sans" on:click=add_market>
+                    "+ add another stock"
                 </button>
             </div>
 
             <div class="space-y-3">
-                <p class="text-xs font-medium text-gray-400 uppercase tracking-wider">"Trades"</p>
+                <p class="text-xs font-medium text-gray-300 font-sans">"Step 2 — what would you do?"</p>
+                <Hint>
+                    "Add each buy or sell you're considering. If a trade closes something you already \
+                     own, pick it under \"Closes\" — that way the gain is measured from what you \
+                     actually paid, and the holding period is counted from when you actually bought."
+                </Hint>
                 {move || trade_entries.get().into_iter().enumerate().map(|(i, te)| {
                     let positions_for_row = Arc::clone(&positions);
                     let market_for_row = market_entries;
@@ -869,8 +916,8 @@ fn ScenarioForm(
                         />
                     }
                 }).collect_view()}
-                <button type="button" class="text-xs text-blue-400 hover:text-blue-300" on:click=add_trade>
-                    "+ add leg"
+                <button type="button" class="text-xs text-blue-400 hover:text-blue-300 font-sans" on:click=add_trade>
+                    "+ add another trade"
                 </button>
             </div>
 
@@ -880,7 +927,7 @@ fn ScenarioForm(
                 class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm font-medium"
                 prop:disabled=move || saving.get()
             >
-                {move || if saving.get() { "Saving…" } else if is_edit { "Save changes" } else { "Create & evaluate" }}
+                {move || if saving.get() { "Saving…" } else if is_edit { "Save changes" } else { "Work out the result" }}
             </button>
         </form>
     }
@@ -1057,9 +1104,10 @@ fn TradeEntryRow(
                 </button>
 
                 <button type="button"
-                    class="text-xs text-gray-500 hover:text-blue-300 border border-border rounded px-2 py-1"
-                    on:click=compute_price title="Compute B-S price from market inputs"
-                >"B-S ▶"</button>
+                    class="text-xs text-gray-500 hover:text-blue-300 border border-border rounded px-2 py-1 font-sans"
+                    on:click=compute_price
+                    title="Estimate what this contract would be worth on the evaluation date, given the stock price you set above"
+                >"Estimate price"</button>
 
                 <button type="button" class="text-gray-600 hover:text-red-400 text-xs ml-auto"
                     on:click=move |_| on_remove()>"✕"</button>
@@ -1134,24 +1182,24 @@ fn TradeEntryRow(
                     }}
                     // Forward vol badge — appears once the SABR surface has data.
                     {move || fwd_vol.get().map(|v| view! {
-                        <span
-                            class="text-xs font-mono text-indigo-300 px-1.5 py-0.5 bg-indigo-900/30 border border-indigo-800/50 rounded"
-                            title="Forward vol from eval date to expiry (SABR variance surface)"
-                        >
-                            {format!("fwd {:.1}%", v * 100.0)}
+                        <span class="inline-flex items-center gap-1 text-xs font-mono text-indigo-300 px-1.5 py-0.5 bg-indigo-900/30 border border-indigo-800/50 rounded">
+                            {format!("{:.1}% expected swing", v * 100.0)}
+                            <Info term="forward-vol" />
                         </span>
                     })}
                 </div>
             })}
 
             <div class="flex items-center gap-2 pl-2">
-                <span class="text-xs text-gray-500">"Closes:"</span>
+                <span class="flex items-center gap-1 text-xs text-gray-500 font-sans">
+                    "Closes something I own" <Info term="closes-position" />
+                </span>
                 <select
                     class="bg-surface border border-border rounded px-2 py-1 text-xs text-gray-300 focus:outline-none focus:border-blue-500"
                     prop:value=move || entry.closes_id.get().map(|id| id.to_string()).unwrap_or_default()
                     on:change=on_closes_change
                 >
-                    <option value="">"— none —"</option>
+                    <option value="">"— no, this is a new trade —"</option>
                     {pos_for_select.iter().map(|p| {
                         let id = p.id.to_string();
                         let label = match &p.option_spec {
@@ -1164,7 +1212,9 @@ fn TradeEntryRow(
                     }).collect_view()}
                 </select>
                 {move || entry.closes_id.get().map(|_| view! {
-                    <span class="text-xs text-yellow-400">"⚡ P&L will be computed"</span>
+                    <span class="text-xs text-yellow-400 font-sans">
+                        "Gain measured from your real cost basis and purchase date"
+                    </span>
                 })}
             </div>
         </div>
@@ -1243,11 +1293,13 @@ fn ScenarioCard(
     };
 
     view! {
-        <div class="bg-panel border border-border rounded-xl overflow-hidden">
+        // No `overflow-hidden` here: it would clip the definition popovers that
+        // the expanded body anchors. The header rounds its own corners instead.
+        <div class="bg-panel border border-border rounded-xl">
 
             // ── Header ────────────────────────────────────────────────────
             <div
-                class="flex items-center justify-between px-6 py-4 cursor-pointer hover:bg-white/5 transition-colors select-none"
+                class="flex items-center justify-between px-6 py-4 rounded-t-xl cursor-pointer hover:bg-white/5 transition-colors select-none"
                 on:click=move |_| expanded.update(|v| *v = !*v)
             >
                 <div class="flex items-center gap-3 min-w-0">
@@ -1261,7 +1313,9 @@ fn ScenarioCard(
                 </div>
                 <div class="flex items-center gap-2 shrink-0">
                     <div class="text-right mr-2">
-                        <p class="text-xs text-gray-500">"Net cash"</p>
+                        <p class="flex items-center justify-end gap-1 text-xs text-gray-500 font-sans">
+                            "Cash after tax" <Info term="net-cash" align_end=true />
+                        </p>
                         <p class=move || format!("text-lg font-semibold {}", cash_class())>
                             {move || view! { <Num value=after_tax_cash() signed=true /> }}
                         </p>
@@ -1316,7 +1370,14 @@ fn ScenarioCard(
 
                     {(!assignments.is_empty()).then(|| view! {
                         <div class="space-y-1">
-                            <p class="text-xs text-yellow-500 uppercase tracking-wider">"⚡ Auto-detected assignments"</p>
+                            <p class="flex items-center gap-1.5 text-xs text-yellow-500 font-sans font-medium">
+                                "Shares that get taken from you" <Info term="assignment" />
+                            </p>
+                            <Hint>
+                                "At this price, calls you've sold are worth exercising — so these shares \
+                                 are sold at the strike price whether or not you wanted to sell them. \
+                                 That's a taxable sale."
+                            </Hint>
                             {assignments.iter().map(|a| view! {
                                 <div class="flex justify-between items-start text-xs">
                                     <div>
@@ -1343,7 +1404,9 @@ fn ScenarioCard(
 
                     {(!coverage.is_empty()).then(|| view! {
                         <div class="space-y-1">
-                            <p class="text-xs text-gray-500 uppercase tracking-wider">"Position coverage"</p>
+                            <p class="flex items-center gap-1.5 text-xs text-gray-400 font-sans font-medium">
+                                "How much upside you're giving up" <Info term="upside-cap" align_end=true />
+                            </p>
                             {coverage.iter().map(|c| {
                                 let uncovered      = c.uncovered_shares();
                                 let excess         = c.excess_short_delta();
@@ -1374,18 +1437,20 @@ fn ScenarioCard(
                                                 }
                                             })}
                                             {(excess > 0).then(|| view! {
-                                                <p class="text-red-400">
-                                                    {format!("−{} net delta ({} excess contracts)", excess, excess / 100)}
+                                                <p class="inline-flex items-center gap-1 text-red-400 font-sans">
+                                                    {format!("{} contracts more than you have shares for", excess / 100)}
+                                                    <Info term="excess-short-calls" align_end=true />
                                                 </p>
                                             })}
                                             {(uncovered > 0).then(|| view! {
-                                                <p class="text-yellow-400">
-                                                    {format!("{} shares uncovered", uncovered)}
+                                                <p class="inline-flex items-center gap-1 text-yellow-400 font-sans">
+                                                    {format!("{} shares still free to rise", uncovered)}
+                                                    <Info term="uncovered-shares" align_end=true />
                                                 </p>
                                             })}
                                             {(uncovered == 0 && excess == 0).then(|| view! {
-                                                <p class="text-gray-500">
-                                                    {format!("{} shares, {} contracts", net_shares, net_calls)}
+                                                <p class="text-gray-500 font-sans">
+                                                    {format!("{} shares, {} contracts sold against them", net_shares, net_calls)}
                                                 </p>
                                             })}
                                         </div>
@@ -1397,21 +1462,30 @@ fn ScenarioCard(
 
                     <div class="border-t border-border pt-3 grid grid-cols-2 gap-4 text-xs">
                         <div>
-                            <p class="text-gray-500 mb-1">"Realized gains"</p>
-                            <p class="text-yellow-300">"ST: " {fmt_cash(total_st)}</p>
-                            <p class="text-blue-300">"LT: " {fmt_cash(total_lt)}</p>
+                            <p class="text-gray-500 mb-1 font-sans">"Taxable gains this creates"</p>
+                            <p class="inline-flex items-center gap-1 text-yellow-300 font-sans">
+                                "Taxed as income " <Info term="short-term-gain" />
+                                <span class="font-mono">{fmt_cash(total_st)}</span>
+                            </p>
+                            <p class="inline-flex items-center gap-1 text-blue-300 font-sans">
+                                "Taxed at the lower rate " <Info term="long-term-gain" />
+                                <span class="font-mono">{fmt_cash(total_lt)}</span>
+                            </p>
                             <div class="mt-2 space-y-0.5">
                                 {move || {
                                     if let Some(e) = tax_err.get() {
                                         let is_missing = e.contains("No tax profile");
                                         view! {
-                                            <p class="text-orange-300">
+                                            <p class="text-orange-300 font-sans">
                                                 {if is_missing {
-                                                    format!("Tax ({tax_year}): no profile — ")
+                                                    format!("To estimate the tax, Martingale needs your {tax_year} income — ")
                                                 } else {
-                                                    format!("Tax ({tax_year}): {} — ", e)
+                                                    format!("Couldn't estimate {tax_year} tax: {} — ", e)
                                                 }}
-                                                <a href="/tax" class="underline text-gray-400">"set up Taxes"</a>
+                                                <a
+                                                    href=format!("{}/tax", crate::config::APP_BASE)
+                                                    class="underline text-gray-300 hover:text-white"
+                                                >"add it on the Taxes page"</a>
                                             </p>
                                         }.into_any()
                                     } else if let Some(bt) = baseline_tax.get() {
@@ -1424,23 +1498,28 @@ fn ScenarioCard(
                                             format!("saves {} in tax", fmt_cash(-delta))
                                         };
                                         view! {
-                                            <p class="text-gray-400">
-                                                {format!("Base tax ({tax_year}): {}", fmt_cash(bt))}
+                                            <p class="inline-flex items-center gap-1 text-gray-400 font-sans">
+                                                {format!("Your {tax_year} tax without this ")}
+                                                <Info term="baseline-tax" />
+                                                <span class="font-mono">{fmt_cash(bt)}</span>
                                             </p>
-                                            <p class=move || if delta <= 0.0 { "text-green-400" } else { "text-orange-300" }>
-                                                {format!("Scenario: {}", impact_str)}
+                                            <p class=move || format!(
+                                                "font-sans {}",
+                                                if delta <= 0.0 { "text-green-400" } else { "text-orange-300" },
+                                            )>
+                                                {format!("Doing this {}", impact_str)}
                                             </p>
                                         }.into_any()
                                     } else {
                                         view! {
-                                            <p class="text-gray-500">"Tax: computing…"</p>
+                                            <p class="text-gray-500 font-sans">"Working out the tax…"</p>
                                         }.into_any()
                                     }
                                 }}
                             </div>
                         </div>
                         <div class="text-right">
-                            <p class="text-gray-500 mb-1">"Pre-tax cash"</p>
+                            <p class="text-gray-500 mb-1 font-sans">"Cash before tax"</p>
                             <p class=format!("text-xl font-semibold {}", if net_cash >= 0.0 { "text-green-300" } else { "text-red-300" })>
                                 <Num value=net_cash signed=true />
                             </p>
@@ -1449,14 +1528,33 @@ fn ScenarioCard(
 
                     {has_market.then(|| view! {
                         <div class="border-t border-border pt-3">
-                            <p class="text-xs text-gray-500 mb-2">"New Portfolio Greeks"</p>
-                            <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs font-mono">
-                                <span class="text-gray-500">"Δ "<span class="text-gray-200">{format!("{:.2}", greeks.delta)}</span></span>
-                                <span class="text-gray-500">"Γ "<span class="text-gray-200">{format!("{:.4}", greeks.gamma)}</span></span>
-                                <span class="text-gray-500">"ν "<span class="text-gray-200">{format!("{:.2}", greeks.vega)}</span></span>
-                                <span class="text-gray-500">"θ "<span class="text-gray-200">{format!("{:.2}", greeks.theta)}</span></span>
-                                <span class="text-gray-500">"ρ "<span class="text-gray-200">{format!("{:.2}", greeks.rho)}</span></span>
-                            </div>
+                            <Disclosure
+                                summary="What your portfolio would react to afterwards"
+                                detail="Your whole portfolio, as it would stand once these trades are done."
+                            >
+                                <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs font-mono">
+                                    <span class="inline-flex items-center gap-1 text-gray-500 font-sans">
+                                        "Per $1 move" <Info term="delta" />
+                                        <span class="text-gray-200 font-mono">{format!("{:.2}", greeks.delta)}</span>
+                                    </span>
+                                    <span class="inline-flex items-center gap-1 text-gray-500 font-sans">
+                                        "Change in that" <Info term="gamma" />
+                                        <span class="text-gray-200 font-mono">{format!("{:.4}", greeks.gamma)}</span>
+                                    </span>
+                                    <span class="inline-flex items-center gap-1 text-gray-500 font-sans">
+                                        "Per 1% vol" <Info term="vega" />
+                                        <span class="text-gray-200 font-mono">{format!("{:.2}", greeks.vega)}</span>
+                                    </span>
+                                    <span class="inline-flex items-center gap-1 text-gray-500 font-sans">
+                                        "Per day" <Info term="theta" />
+                                        <span class="text-gray-200 font-mono">{format!("{:.2}", greeks.theta)}</span>
+                                    </span>
+                                    <span class="inline-flex items-center gap-1 text-gray-500 font-sans">
+                                        "Per 1% rate" <Info term="rho" />
+                                        <span class="text-gray-200 font-mono">{format!("{:.2}", greeks.rho)}</span>
+                                    </span>
+                                </div>
+                            </Disclosure>
                         </div>
                     })}
                 </div>
@@ -1470,10 +1568,15 @@ use crate::format::{fmt_cash, Num};
 // ── Shared form components ────────────────────────────────────────────────────
 
 #[component]
-fn FormInput(label: &'static str, signal: RwSignal<String>, ph: &'static str) -> impl IntoView {
+fn FormInput(
+    label: &'static str,
+    #[prop(optional_no_strip)] term: Option<&'static str>,
+    signal: RwSignal<String>,
+    ph: &'static str,
+) -> impl IntoView {
     view! {
         <div>
-            <label class="block text-xs text-gray-400 mb-1">{label}</label>
+            <Label text=label term=term />
             <input
                 class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
                 prop:value=move || signal.get()
