@@ -712,9 +712,8 @@ fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
                             most people want: it's roughly the dollar change for a $1 move in the \
                             underlying stock."
                 >
-                    <div class="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
                         <GreekStat label="Per $1 move" term="delta" value=summary.net_delta fmt="{:.1}" />
-                        <GreekStat label="Change in that" term="gamma" value=summary.net_gamma fmt="{:.4}" />
                         <GreekStat label="Per 1% vol" term="vega" value=summary.net_vega fmt="${:.2}" />
                         <GreekStat label="Per day" term="theta" value=summary.net_theta fmt="${:.2}" />
                         <GreekStat label="Per 1% rate" term="rho" value=summary.net_rho fmt="${:.2}" />
@@ -888,7 +887,7 @@ fn PositionRow(
 
             // Sensitivities — collapsed; most rows never need them open.
             {metrics.as_ref().map(|m| {
-                let (d, g, v, t, r) = (m.delta, m.gamma, m.vega, m.theta, m.rho);
+                let (d, v, t, r) = (m.delta, m.vega, m.theta, m.rho);
                 view! {
                     <div class="pl-14">
                         <Disclosure
@@ -901,9 +900,6 @@ fn PositionRow(
                                     "Per $1 move " <Info term="delta" /> <GreekVal v=d fmt="f1" />
                                 </span>
                                 {is_option.then(|| view! {
-                                    <span class="inline-flex items-center gap-1">
-                                        "Change in that " <Info term="gamma" /> <GreekVal v=g fmt="f4" />
-                                    </span>
                                     <span class="inline-flex items-center gap-1">
                                         "Per 1% vol " <Info term="vega" /> <GreekVal v=v fmt="$" />
                                     </span>

@@ -176,7 +176,6 @@ fn BsPricer() -> impl IntoView {
                         >
                             <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
                                 <GreekRow label="If the stock rises $1" term="delta" value=format!("{:+.4}", r.delta) />
-                                <GreekRow label="How fast that shifts" term="gamma" value=format!("{:+.4}", r.gamma) />
                                 <GreekRow label="If swings rise 1 point" term="vega" value=format!("{:+.4}", r.vega) />
                                 <GreekRow label="Each day that passes" term="theta" value=format!("{:+.4}", r.theta) />
                                 <GreekRow label="If rates rise 1 point" term="rho" value=format!("{:+.4}", r.rho) />

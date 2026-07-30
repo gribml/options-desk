@@ -1538,10 +1538,6 @@ fn ScenarioCard(
                                         <span class="text-gray-200 font-mono">{format!("{:.2}", greeks.delta)}</span>
                                     </span>
                                     <span class="inline-flex items-center gap-1 text-gray-500 font-sans">
-                                        "Change in that" <Info term="gamma" />
-                                        <span class="text-gray-200 font-mono">{format!("{:.4}", greeks.gamma)}</span>
-                                    </span>
-                                    <span class="inline-flex items-center gap-1 text-gray-500 font-sans">
                                         "Per 1% vol" <Info term="vega" />
                                         <span class="text-gray-200 font-mono">{format!("{:.2}", greeks.vega)}</span>
                                     </span>

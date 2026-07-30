@@ -111,6 +111,8 @@ pub const TERMS: &[Definition] = &[
         title: "Delta — price sensitivity",
         body: "Roughly how many dollars the position gains if the stock rises by $1. Owning 200 shares gives a delta of 200. A delta near zero means the stock's direction barely affects you.",
     },
+    // Retained but currently unreferenced: gamma is still computed throughout,
+    // just not shown in the UI. Delete this entry only if that changes for good.
     Definition {
         key: "gamma",
         title: "Gamma — how fast delta shifts",
