@@ -82,12 +82,12 @@ pub const TERMS: &[Definition] = &[
     Definition {
         key: "market-value",
         title: "Market value",
-        body: "What the whole position is worth right now — mark price multiplied by how much you hold.",
+        body: "What everything is worth right now — each holding's current price times how much of it you have. An option you've sold counts against you here: it's an obligation you'd have to buy back, not an asset, so it subtracts. A position that's mostly sold options can therefore show a value below its gain, or even a negative one, while still being well ahead.",
     },
     Definition {
         key: "unrealised-pnl",
         title: "Unrealised gain or loss",
-        body: "The profit you'd book if you closed the position today, before tax. It's on paper only — nothing is owed until you actually sell.",
+        body: "What everything is worth today, minus what it cost you to get there — the gap between this and the portfolio value is exactly that cost. Things you bought cost positive money, so their gain comes out below their value. But an option you sold paid you to open it, so its cost is negative: that's why a gain can be larger than the portfolio value, and it isn't an error when it is. Paper only either way — nothing is owed until you close out.",
     },
     Definition {
         key: "realized-pnl",
@@ -226,8 +226,8 @@ pub const TERMS: &[Definition] = &[
     },
     Definition {
         key: "implied-tax",
-        title: "Tax if you sold today",
-        body: "The extra federal tax you'd owe by closing this position now, on top of what you already owe for the year. It accounts for your other income, so it's a marginal figure, not a flat percentage.",
+        title: "Tax if you closed today",
+        body: "The extra federal tax you'd owe by closing this position now — selling it if you're long, buying it back if you've sold it short — on top of what you already owe for the year. It accounts for your other income, so it's a marginal figure, not a flat percentage.",
     },
     Definition {
         key: "baseline-tax",

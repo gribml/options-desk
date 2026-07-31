@@ -695,7 +695,7 @@ fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
                 </Stat>
                 <div class="text-right">
                     <div class="flex items-center justify-end gap-1.5 mb-1">
-                        <span class="text-xs text-gray-400 font-sans">"Gain if you sold today"</span>
+                        <span class="text-xs text-gray-400 font-sans">"Capital gains if you closed today"</span>
                         <Info term="unrealised-pnl" />
                     </div>
                     <p class=format!("text-2xl font-semibold {}", pnl_class)>
@@ -875,7 +875,7 @@ fn PositionRow(
                     </span>
                 </span>
                 <span class="flex items-center gap-1.5">
-                    "Tax if sold today " <Info term="implied-tax" />
+                    "Tax if closed today " <Info term="implied-tax" />
                     {move || match implied_tax.get().get(&pid).copied() {
                         Some(t) if t > 0.0 => view! {
                             <span class="text-orange-300">{fmt_cash(-t)}</span>
