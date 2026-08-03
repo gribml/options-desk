@@ -11,8 +11,8 @@ use crate::api::supabase::{self, AuthResponse};
 use crate::components::nav::Nav;
 use crate::store::MarketStore;
 use crate::pages::{
-    login::LoginPage, portfolio::PortfolioPage, pricer::PricerPage, scenarios::ScenariosPage,
-    tax::TaxPage,
+    import::ImportPage, login::LoginPage, portfolio::PortfolioPage, pricer::PricerPage,
+    scenarios::ScenariosPage, tax::TaxPage,
 };
 
 const REFRESH_INTERVAL_MS: u32 = 45 * 60 * 1000; // 45 minutes
@@ -116,6 +116,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/login") view=LoginPage />
                     <Route path=path!("/pricer") view=move || view! { <Protected><PricerPage /></Protected> } />
                     <Route path=path!("/portfolio") view=move || view! { <Protected><PortfolioPage /></Protected> } />
+                    <Route path=path!("/import") view=move || view! { <Protected><ImportPage /></Protected> } />
                     <Route path=path!("/scenarios") view=move || view! { <Protected><ScenariosPage /></Protected> } />
                     <Route path=path!("/tax") view=move || view! { <Protected><TaxPage /></Protected> } />
                 </Routes>

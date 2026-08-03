@@ -445,12 +445,19 @@ pub fn PortfolioPage() -> impl IntoView {
                         "Everything you hold, what it's worth today, and what selling it would cost you in tax."
                     </p>
                 </div>
-                <button
-                    class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors shrink-0"
-                    on:click=move |_| show_add.update(|v| *v = !*v)
-                >
-                    {move || if show_add.get() { "Cancel" } else { "+ Add position" }}
-                </button>
+                <div class="flex items-center gap-2 shrink-0">
+                    <a
+                        href=format!("{}/import", crate::config::APP_BASE)
+                        class="px-4 py-2 rounded text-sm font-medium border border-border text-gray-300 hover:border-gray-500 transition-colors"
+                        title="Bring in holdings with their real purchase dates"
+                    >"Import"</a>
+                    <button
+                        class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
+                        on:click=move |_| show_add.update(|v| *v = !*v)
+                    >
+                        {move || if show_add.get() { "Cancel" } else { "+ Add position" }}
+                    </button>
+                </div>
             </div>
 
             {move || show_add.get().then(|| view! {
@@ -495,14 +502,21 @@ pub fn PortfolioPage() -> impl IntoView {
                 <EmptyState
                     title="Start with what you own"
                     body="Add a stock you hold and Martingale pulls the live price, works out your gain, \
-                          and shows what selling it today would cost you in federal tax. Once a holding \
-                          is here you can model covered calls and rolls against it."
+                          and shows what selling it today would cost you in federal tax. Importing is \
+                          worth the extra minute — it records when you bought each parcel of shares, \
+                          which is what decides whether a gain is taxed at the lower long-term rate."
                 >
-                    <button
+                    <a
+                        href=format!("{}/import", crate::config::APP_BASE)
                         class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
+                    >
+                        "Import my holdings"
+                    </a>
+                    <button
+                        class="px-4 py-2 rounded text-sm font-medium border border-border text-gray-300 hover:border-gray-500 transition-colors"
                         on:click=move |_| show_add.set(true)
                     >
-                        "Add my first holding"
+                        "Add one by hand"
                     </button>
                 </EmptyState>
             })}
@@ -1080,6 +1094,50 @@ fn TradeLogPanel(
     // StoredValue<T> is Copy when T: Send + Sync + 'static.
     let base_pos = StoredValue::new(position);
 
+    // Marginal tax of selling each open lot on its own, keyed by trade id. This
+    // is the point of holding lots separately: two parcels of the same stock with
+    // the same gain are taxed differently depending on which side of the one-year
+    // line they sit. Each is priced in isolation, like the per-position figures.
+    let lot_tax = RwSignal::new(HashMap::<Uuid, f64>::new());
+    Effect::new(move |_| {
+        let Some(token) = auth.token.get() else { return };
+        let Some(mp) = mark_price else { return };
+        let (open_lots, _) = match_trades(&trades_sig.get(), LotAllocation::Fifo);
+        if open_lots.is_empty() {
+            return;
+        }
+        let today = Utc::now().date_naive();
+        let mult = if is_option { 100.0 } else { 1.0 };
+        let items: Vec<market::TaxItemRequest> = open_lots
+            .iter()
+            .map(|lot| {
+                let gain = (mp - lot.price)
+                    * lot.quantity.signum() as f64
+                    * lot.quantity.abs() as f64
+                    * mult;
+                // Options are always short-term here, matching the position-level
+                // rule: this app doesn't model the long-term option holding period.
+                let is_lt = !is_option && (today - lot.date).num_days() > 365;
+                market::TaxItemRequest {
+                    id: lot.trade_id.to_string(),
+                    st_gain: if is_lt { 0.0 } else { gain },
+                    lt_gain: if is_lt { gain } else { 0.0 },
+                }
+            })
+            .collect();
+        spawn_local(async move {
+            if let Ok(batch) = market::estimate_portfolio_tax(&token, Utc::now().year(), items).await {
+                let mut map = HashMap::new();
+                for r in batch.results {
+                    if let Ok(id) = r.id.parse::<Uuid>() {
+                        map.insert(id, r.tax);
+                    }
+                }
+                lot_tax.set(map);
+            }
+        });
+    });
+
     // All captures of do_save_fn are Copy + Send + Sync, making the closure itself Copy.
     let do_save_fn = move |new_trades: Vec<Trade>| {
         let mut pos = base_pos.get_value();
@@ -1185,32 +1243,62 @@ fn TradeLogPanel(
                     <div class="space-y-3">
                         {has_open.then(|| view! {
                             <div class="space-y-1">
-                                <p class="text-xs font-medium text-gray-300">"Open lots"</p>
+                                <p class="text-xs font-medium text-gray-300 font-sans">"Each parcel you bought"</p>
+                                <Hint>
+                                    "A sale is taxed lot by lot. Parcels held over a year get the lower \
+                                     long-term rate, so which ones you sell changes the bill."
+                                </Hint>
                                 <div class="grid gap-x-4 text-xs text-gray-500"
-                                    style="grid-template-columns: auto auto auto auto auto">
-                                    <span>"Date"</span>
-                                    <span class="text-right">"Qty"</span>
-                                    <span class="text-right">"Cost"</span>
-                                    <span class="text-right">"Days"</span>
-                                    <span class="text-right">"Unreal. P&L"</span>
+                                    style="grid-template-columns: auto auto auto auto auto auto">
+                                    <span class="font-sans">"Bought"</span>
+                                    <span class="text-right font-sans">"Qty"</span>
+                                    <span class="text-right font-sans">"Paid"</span>
+                                    <span class="text-right font-sans">"Held"</span>
+                                    <span class="text-right font-sans">"Gain"</span>
+                                    <span class="text-right font-sans inline-flex items-center gap-1 justify-end">
+                                        "Tax to sell" <Info term="implied-tax" align_end=true />
+                                    </span>
                                     {open_lots.iter().map(|lot| {
                                         let days = (Utc::now().date_naive() - lot.date).num_days();
-                                        let holding = if days > 365 { format!("{}d LT", days) } else { format!("{}d", days) };
-                                        let holding_cls = if days > 365 { "text-green-500" } else { "text-gray-400" };
+                                        let is_lt = days > 365;
+                                        let holding = if is_lt {
+                                            format!("{}y {}d", days / 365, days % 365)
+                                        } else {
+                                            format!("{days}d")
+                                        };
+                                        let holding_cls = if is_lt { "text-green-500" } else { "text-gray-400" };
                                         let unrealized = mark_price.map(|mp| {
                                             let mult = if is_option { 100.0 } else { 1.0 };
                                             (mp - lot.price) * lot.quantity.signum() as f64 * lot.quantity.abs() as f64 * mult
                                         });
                                         let pnl_cls = unrealized.map(|p| if p >= 0.0 { "text-green-400" } else { "text-red-400" }).unwrap_or("text-gray-500");
+                                        let tid = lot.trade_id;
                                         view! {
                                             <span class="text-gray-400">{lot.date.format("%b %-d '%y").to_string()}</span>
                                             <span class="text-right font-mono">{format!("{:+}", lot.quantity)}</span>
-                                            <span class="text-right">{format!("${:.2}", lot.price)}</span>
-                                            <span class=format!("text-right {}", holding_cls)>{holding}</span>
+                                            <span class="text-right font-mono">{format!("${:.2}", lot.price)}</span>
+                                            <span class=format!("text-right {}", holding_cls)>
+                                                {holding}
+                                                {is_lt.then(|| view! {
+                                                    <span class="ml-1 text-[10px] font-sans">"long-term"</span>
+                                                })}
+                                            </span>
                                             <span class=format!("text-right font-mono {}", pnl_cls)>
                                                 {match unrealized {
                                                     Some(v) => fmt_cash(v),
                                                     None => "—".into(),
+                                                }}
+                                            </span>
+                                            <span class="text-right font-mono">
+                                                {move || match lot_tax.get().get(&tid).copied() {
+                                                    Some(t) if t > 0.5 => view! {
+                                                        <span class="text-orange-300">{fmt_cash(-t)}</span>
+                                                    }.into_any(),
+                                                    Some(t) if t < -0.5 => view! {
+                                                        <span class="text-green-400">{fmt_cash(-t)}</span>
+                                                    }.into_any(),
+                                                    Some(_) => view! { <span class="text-gray-600">"none"</span> }.into_any(),
+                                                    None => view! { <span class="text-gray-600">"—"</span> }.into_any(),
                                                 }}
                                             </span>
                                         }
