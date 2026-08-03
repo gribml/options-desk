@@ -232,7 +232,7 @@ pub const TERMS: &[Definition] = &[
     Definition {
         key: "portfolio-tax",
         title: "Tax if you closed everything today",
-        body: "What you'd owe if you sold up completely. Gains and losses are added together before the tax is worked out — which is how your return actually does it — so this is not the sum of the per-position figures above. That matters most for a covered call: as the stock climbs, its gain grows without limit while the call you sold runs an equally growing loss, and the two cancel. This total stays roughly flat, which is the truth of it; the individual rows are the ones that mislead.",
+        body: "What you'd owe if you sold up completely. Gains and losses are added together before the tax is worked out — which is how your return actually does it — so this will not match the sum of the per-position figures above, and can land either side of it. It matters most for a covered call: as the stock climbs its gain grows without limit while the call you sold runs an equally growing loss, and the two cancel, so this total stays roughly flat. That is the truth of the position; the individual rows are the ones that mislead.",
     },
     Definition {
         key: "baseline-tax",

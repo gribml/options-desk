@@ -127,6 +127,11 @@ fn compute_metrics(pos: &Position, md: &MarketData) -> Option<PositionMetrics> {
     }
 }
 
+/// Sentinel id for the netted whole-portfolio figure, carried alongside the
+/// per-position items on the same `/tax` request. Deliberately not a UUID, so
+/// it can never collide with a position id.
+const TOTAL_TAX_ID: &str = "portfolio-total";
+
 // ── Portfolio summary ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -310,6 +315,11 @@ pub fn PortfolioPage() -> impl IntoView {
     let implied_tax = RwSignal::new(HashMap::<Uuid, f64>::new());
     let total_tax = RwSignal::new(Option::<f64>::None);
     let total_tax_err = RwSignal::new(Option::<String>::None);
+    // Marks move while the page settles — a symbol's implied vol replaces the
+    // 25% default some seconds after load — so this effect re-runs and several
+    // requests are in flight at once. Their responses are not ordered, so a
+    // stale one must not be allowed to land on top of a fresher one.
+    let tax_gen = RwSignal::new(0u64);
     let tax_year = Utc::now().year();
     Effect::new(move |_| {
         let token = match auth.token.get() { Some(t) => t, None => return };
@@ -334,26 +344,44 @@ pub fn PortfolioPage() -> impl IntoView {
             return;
         }
 
-        // Net across positions first, then tax once.
+        // Net across positions first, then tax once. Sent as one more item on
+        // the same request rather than a second call, so the total and the rows
+        // can never come from different snapshots of the marks.
+        let mut items = items;
         let st_total: f64 = items.iter().map(|i| i.st_gain).sum();
         let lt_total: f64 = items.iter().map(|i| i.lt_gain).sum();
-        let tok_total = token.clone();
-        spawn_local(async move {
-            match market::estimate_trade_tax(&tok_total, tax_year, st_total, lt_total).await {
-                Ok(r) => { total_tax.set(Some(r.tax)); total_tax_err.set(None); }
-                Err(e) => { total_tax.set(None); total_tax_err.set(Some(e)); }
-            }
+        items.push(market::TaxItemRequest {
+            id: TOTAL_TAX_ID.to_string(),
+            st_gain: st_total,
+            lt_gain: lt_total,
         });
 
+        let generation = tax_gen.get_untracked() + 1;
+        tax_gen.set(generation);
+
         spawn_local(async move {
-            if let Ok(batch) = market::estimate_portfolio_tax(&token, tax_year, items).await {
-                let mut map = HashMap::new();
-                for r in batch.results {
-                    if let Ok(uid) = r.id.parse::<Uuid>() {
-                        map.insert(uid, r.tax);
+            let batch = market::estimate_portfolio_tax(&token, tax_year, items).await;
+            // Superseded while in flight — drop it rather than clobber newer marks.
+            if tax_gen.get_untracked() != generation { return; }
+            match batch {
+                Ok(batch) => {
+                    let mut map = HashMap::new();
+                    let mut total = None;
+                    for r in batch.results {
+                        if r.id == TOTAL_TAX_ID {
+                            total = Some(r.tax);
+                        } else if let Ok(uid) = r.id.parse::<Uuid>() {
+                            map.insert(uid, r.tax);
+                        }
                     }
+                    implied_tax.set(map);
+                    total_tax.set(total);
+                    total_tax_err.set(None);
                 }
-                implied_tax.set(map);
+                Err(e) => {
+                    total_tax.set(None);
+                    total_tax_err.set(Some(e));
+                }
             }
         });
     });
