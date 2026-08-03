@@ -296,9 +296,20 @@ pub fn PortfolioPage() -> impl IntoView {
 
     let summary = Memo::new(move |_| summarize(&positions.get(), &metrics.get()));
 
-    // Implied liquidation tax per position, computed in one batch by the Worker
-    // against the user's current-year profile. Re-runs when marks change.
+    // Implied liquidation tax, computed by the Worker against the user's
+    // current-year profile. Re-runs when marks change.
+    //
+    // Two figures, and the difference between them matters. The per-position map
+    // prices each position in isolation ("what if I closed just this one?"). The
+    // portfolio total sums ST and LT *before* taxing, so gains and losses across
+    // positions cancel first — which is what §1211(b) does on a real return.
+    // For a hedged position the two diverge without bound: as the underlying
+    // runs, a covered call's stock leg shows an ever-growing gain and the short
+    // call an ever-growing offsetting loss, while the netted total stays flat.
+    // The total is the honest headline; the per-position figures are context.
     let implied_tax = RwSignal::new(HashMap::<Uuid, f64>::new());
+    let total_tax = RwSignal::new(Option::<f64>::None);
+    let total_tax_err = RwSignal::new(Option::<String>::None);
     let tax_year = Utc::now().year();
     Effect::new(move |_| {
         let token = match auth.token.get() { Some(t) => t, None => return };
@@ -318,7 +329,22 @@ pub fn PortfolioPage() -> impl IntoView {
                 })
             })
             .collect();
-        if items.is_empty() { return; }
+        if items.is_empty() {
+            total_tax.set(None);
+            return;
+        }
+
+        // Net across positions first, then tax once.
+        let st_total: f64 = items.iter().map(|i| i.st_gain).sum();
+        let lt_total: f64 = items.iter().map(|i| i.lt_gain).sum();
+        let tok_total = token.clone();
+        spawn_local(async move {
+            match market::estimate_trade_tax(&tok_total, tax_year, st_total, lt_total).await {
+                Ok(r) => { total_tax.set(Some(r.tax)); total_tax_err.set(None); }
+                Err(e) => { total_tax.set(None); total_tax_err.set(Some(e)); }
+            }
+        });
+
         spawn_local(async move {
             if let Ok(batch) = market::estimate_portfolio_tax(&token, tax_year, items).await {
                 let mut map = HashMap::new();
@@ -433,7 +459,7 @@ pub fn PortfolioPage() -> impl IntoView {
 
             // ── Portfolio summary ───────────────────────────────────────────
             {move || summary.get().has_data.then(|| view! {
-                <SummaryCard summary=summary.get() />
+                <SummaryCard summary=summary.get() total_tax=total_tax total_tax_err=total_tax_err />
             })}
 
             // ── Position rows ───────────────────────────────────────────────
@@ -680,7 +706,11 @@ fn MarketInputsPanel(
 // ── Portfolio summary card ────────────────────────────────────────────────────
 
 #[component]
-fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
+fn SummaryCard(
+    summary: PortfolioSummary,
+    total_tax: RwSignal<Option<f64>>,
+    total_tax_err: RwSignal<Option<String>>,
+) -> impl IntoView {
     let pnl_class = if summary.total_pnl >= 0.0 { "text-green-400" } else { "text-red-400" };
 
     view! {
@@ -703,6 +733,42 @@ fn SummaryCard(summary: PortfolioSummary) -> impl IntoView {
                     </p>
                     <p class="text-[11px] text-gray-600 font-sans mt-0.5">"before tax"</p>
                 </div>
+            </div>
+
+            // Netted across positions — the figure that tracks the portfolio
+            // rather than one leg of it.
+            <div class="border-t border-border pt-3 flex items-baseline justify-between gap-4">
+                <span class="flex items-center gap-1.5 text-xs text-gray-400 font-sans">
+                    "Tax if you closed everything today" <Info term="portfolio-tax" />
+                </span>
+                {move || match (total_tax.get(), total_tax_err.get()) {
+                    (Some(t), _) if t.abs() < 0.5 => view! {
+                        <span class="text-sm text-gray-400 font-sans">"nothing"</span>
+                    }.into_any(),
+                    (Some(t), _) if t > 0.0 => view! {
+                        <span class="text-lg font-semibold text-orange-300">{fmt_cash(-t)}</span>
+                    }.into_any(),
+                    (Some(t), _) => view! {
+                        <span class="text-lg font-semibold text-green-400">
+                            {fmt_cash(-t)} <span class="text-xs font-normal font-sans">" of losses to claim"</span>
+                        </span>
+                    }.into_any(),
+                    (None, Some(e)) => {
+                        let missing = e.contains("No tax profile");
+                        view! {
+                            <span class="text-xs text-gray-500 font-sans text-right">
+                                {if missing { "Needs your income — " } else { "Couldn’t work it out — " }}
+                                <a
+                                    href=format!("{}/tax", crate::config::APP_BASE)
+                                    class="underline text-gray-300 hover:text-white"
+                                >"Taxes page"</a>
+                            </span>
+                        }.into_any()
+                    }
+                    (None, None) => view! {
+                        <span class="text-xs text-gray-600 font-sans">"working it out…"</span>
+                    }.into_any(),
+                }}
             </div>
 
             <div class="border-t border-border pt-3">
@@ -875,12 +941,21 @@ fn PositionRow(
                     </span>
                 </span>
                 <span class="flex items-center gap-1.5">
-                    "Tax if closed today " <Info term="implied-tax" />
+                    "Tax if closed on its own " <Info term="implied-tax" />
+                    // A losing leg produces a negative marginal tax: it shelters
+                    // gains elsewhere. Showing that as "—" hid exactly the half
+                    // that offsets a hedged position's winning leg.
                     {move || match implied_tax.get().get(&pid).copied() {
+                        Some(t) if t.abs() < 0.5 => view! {
+                            <span class="text-gray-600">"none"</span>
+                        }.into_any(),
                         Some(t) if t > 0.0 => view! {
                             <span class="text-orange-300">{fmt_cash(-t)}</span>
                         }.into_any(),
-                        _ => view! { <span class="text-gray-600">"—"</span> }.into_any(),
+                        Some(t) => view! {
+                            <span class="text-green-400">{fmt_cash(-t)} " saved"</span>
+                        }.into_any(),
+                        None => view! { <span class="text-gray-600">"—"</span> }.into_any(),
                     }}
                 </span>
             </div>

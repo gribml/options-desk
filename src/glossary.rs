@@ -226,8 +226,13 @@ pub const TERMS: &[Definition] = &[
     },
     Definition {
         key: "implied-tax",
-        title: "Tax if you closed today",
-        body: "The extra federal tax you'd owe by closing this position now — selling it if you're long, buying it back if you've sold it short — on top of what you already owe for the year. It accounts for your other income, so it's a marginal figure, not a flat percentage.",
+        title: "Tax if you closed this one on its own",
+        body: "What closing just this position would add to your federal tax — selling it if you're long, buying it back if you've sold it short. It deliberately ignores your other positions, so if you've sold a call against this stock, the loss on that call isn't counted here. A losing position shows a saving instead, because it shelters gains elsewhere. For the number that nets everything together, use the portfolio total at the top.",
+    },
+    Definition {
+        key: "portfolio-tax",
+        title: "Tax if you closed everything today",
+        body: "What you'd owe if you sold up completely. Gains and losses are added together before the tax is worked out — which is how your return actually does it — so this is not the sum of the per-position figures above. That matters most for a covered call: as the stock climbs, its gain grows without limit while the call you sold runs an equally growing loss, and the two cancel. This total stays roughly flat, which is the truth of it; the individual rows are the ones that mislead.",
     },
     Definition {
         key: "baseline-tax",
