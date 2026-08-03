@@ -74,7 +74,7 @@ pub fn ImportPage() -> impl IntoView {
     let basis = RwSignal::new(BasisKind::PerShare);
 
     // Review state
-    let lots = RwSignal::new(Vec::<RwSignal<DraftLot>>::new());
+    let lots = RwSignal::new(Vec::<DraftLot>::new());
     let existing = RwSignal::new(Vec::<Position>::new());
     let conflicts = RwSignal::new(HashMap::<String, Conflict>::new());
     let saving = RwSignal::new(false);
@@ -142,12 +142,12 @@ pub fn ImportPage() -> impl IntoView {
             &one_symbol.get_untracked(),
             basis.get_untracked(),
         );
-        lots.set(drafts.into_iter().map(RwSignal::new).collect());
+        lots.set(drafts);
         step.set(Step::Review);
     };
 
-    let start_blank = move |_| {
-        lots.set(vec![RwSignal::new(DraftLot::blank())]);
+    let start_blank = move || {
+        lots.set(vec![DraftLot::blank()]);
         step.set(Step::Review);
     };
 
@@ -155,7 +155,7 @@ pub fn ImportPage() -> impl IntoView {
     let grouped = Memo::new(move |_| {
         let mut map: HashMap<String, Vec<(chrono::NaiveDate, i32, f64)>> = HashMap::new();
         for l in lots.get() {
-            if let Some((sym, d, q, p)) = l.get().resolved() {
+            if let Some((sym, d, q, p)) = l.resolved() {
                 map.entry(sym).or_default().push((d, q, p));
             }
         }
@@ -165,10 +165,10 @@ pub fn ImportPage() -> impl IntoView {
     });
 
     let blocked = Memo::new(move |_| {
-        lots.get().iter().filter(|l| l.get().issues().blocking()).count()
+        lots.get().iter().filter(|l| l.issues().blocking()).count()
     });
 
-    let do_import = move |_| {
+    let do_import = move || {
         let groups = grouped.get_untracked();
         if groups.is_empty() {
             save_err.set(Some("Nothing to import yet.".into()));
@@ -269,8 +269,8 @@ pub fn ImportPage() -> impl IntoView {
                         headers=headers rows=rows has_header=has_header
                         date_col=date_col qty_col=qty_col price_col=price_col
                         symbol_col=symbol_col one_symbol=one_symbol basis=basis
-                        on_back=move |_| step.set(Step::Source)
-                        on_next=move |_| build_lots()
+                        on_back=move || step.set(Step::Source)
+                        on_next=move || build_lots()
                     />
                 }.into_any(),
                 Step::Review => view! {
@@ -278,7 +278,7 @@ pub fn ImportPage() -> impl IntoView {
                         lots=lots grouped=grouped blocked=blocked
                         existing=existing conflicts=conflicts
                         saving=saving save_err=save_err
-                        on_back=move |_| step.set(if rows.get_untracked().is_empty() {
+                        on_back=move || step.set(if rows.get_untracked().is_empty() {
                             Step::Source
                         } else {
                             Step::Map
@@ -322,7 +322,7 @@ fn StepBar(step: RwSignal<Step>) -> impl IntoView {
 #[component]
 fn SourceStep(
     on_file: impl Fn(web_sys::Event) + 'static,
-    on_blank: impl Fn(web_sys::MouseEvent) + 'static,
+    on_blank: impl Fn() + 'static,
     file_name: RwSignal<String>,
     read_err: RwSignal<Option<String>>,
 ) -> impl IntoView {
@@ -359,7 +359,7 @@ fn SourceStep(
                 </Hint>
                 <button
                     class="px-4 py-2 rounded text-sm font-medium border border-border text-gray-200 hover:border-gray-500 transition-colors"
-                    on:click=on_blank
+                    on:click=move |_| on_blank()
                 >"Enter lots by hand"</button>
             </div>
         </div>
@@ -377,8 +377,8 @@ fn MapStep(
     symbol_col: RwSignal<Option<usize>>,
     one_symbol: RwSignal<String>,
     basis: RwSignal<BasisKind>,
-    on_back: impl Fn(web_sys::MouseEvent) + 'static,
-    on_next: impl Fn(web_sys::MouseEvent) + 'static,
+    on_back: impl Fn() + 'static,
+    on_next: impl Fn() + 'static,
 ) -> impl IntoView {
     let picker = move |label: &'static str, term: Option<&'static str>, sig: RwSignal<usize>| {
         view! {
@@ -532,9 +532,9 @@ fn MapStep(
 
             <div class="flex gap-2">
                 <button class="px-4 py-2 rounded text-sm border border-border text-gray-300 hover:border-gray-500 transition-colors"
-                    on:click=on_back>"Back"</button>
+                    on:click=move |_| on_back()>"Back"</button>
                 <button class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
-                    on:click=on_next>"Check the rows →"</button>
+                    on:click=move |_| on_next()>"Check the rows →"</button>
             </div>
         </div>
     }
@@ -569,15 +569,15 @@ where
 
 #[component]
 fn ReviewStep(
-    lots: RwSignal<Vec<RwSignal<DraftLot>>>,
+    lots: RwSignal<Vec<DraftLot>>,
     grouped: Memo<Vec<(String, Vec<(chrono::NaiveDate, i32, f64)>)>>,
     blocked: Memo<usize>,
     existing: RwSignal<Vec<Position>>,
     conflicts: RwSignal<HashMap<String, Conflict>>,
     saving: RwSignal<bool>,
     save_err: RwSignal<Option<String>>,
-    on_back: impl Fn(web_sys::MouseEvent) + 'static,
-    on_import: impl Fn(web_sys::MouseEvent) + 'static,
+    on_back: impl Fn() + 'static,
+    on_import: impl Fn() + 'static,
 ) -> impl IntoView {
     view! {
         <div class="space-y-5">
@@ -605,36 +605,51 @@ fn ReviewStep(
                     <span></span>
                 </div>
 
-                {move || lots.get().into_iter().enumerate().map(|(i, lot)| {
-                    let iss = Memo::new(move |_| lot.get().issues());
+                // Addressed by index into the one `lots` signal. An earlier draft
+                // gave each row its own nested RwSignal, but those were built
+                // inside a click handler — outside any reactive owner — and never
+                // wired into the graph, so the review step rendered dead rows.
+                {move || (0..lots.get().len()).map(|i| {
+                    let iss = Memo::new(move |_| lots.get().get(i).map(|l| l.issues()));
+                    let field = move |get: fn(&DraftLot) -> &String| {
+                        move || lots.get().get(i).map(|l| get(l).clone()).unwrap_or_default()
+                    };
                     view! {
                         <div class="grid grid-cols-[6rem_9rem_7rem_8rem_auto] gap-2 items-start">
                             <LotCell
-                                value=move || lot.get().symbol
-                                set=move |v: String| lot.update(|l| l.symbol = v.to_uppercase())
-                                err=move || iss.get().symbol
+                                value=field(|l| &l.symbol)
+                                set=move |v: String| lots.update(|rows| {
+                                    if let Some(l) = rows.get_mut(i) { l.symbol = v.to_uppercase(); }
+                                })
+                                err=move || iss.get().and_then(|x| x.symbol)
                                 ph="PLTR"
                             />
                             <LotCell
-                                value=move || lot.get().date
-                                set=move |v: String| lot.update(|l| l.date = v)
-                                err=move || iss.get().date
+                                value=field(|l| &l.date)
+                                set=move |v: String| lots.update(|rows| {
+                                    if let Some(l) = rows.get_mut(i) { l.date = v; }
+                                })
+                                err=move || iss.get().and_then(|x| x.date)
                                 ph="2021-03-15"
                             />
                             <LotCell
-                                value=move || lot.get().quantity
-                                set=move |v: String| lot.update(|l| l.quantity = v)
-                                err=move || iss.get().quantity
+                                value=field(|l| &l.quantity)
+                                set=move |v: String| lots.update(|rows| {
+                                    if let Some(l) = rows.get_mut(i) { l.quantity = v; }
+                                })
+                                err=move || iss.get().and_then(|x| x.quantity)
                                 ph="100"
                             />
                             <LotCell
-                                value=move || lot.get().price
-                                set=move |v: String| lot.update(|l| l.price = v)
-                                err=move || iss.get().price
+                                value=field(|l| &l.price)
+                                set=move |v: String| lots.update(|rows| {
+                                    if let Some(l) = rows.get_mut(i) { l.price = v; }
+                                })
+                                err=move || iss.get().and_then(|x| x.price)
                                 ph="15.25"
                             />
                             <div class="flex items-center gap-2 pt-1">
-                                {move || iss.get().warning.map(|w| view! {
+                                {move || iss.get().and_then(|x| x.warning).map(|w| view! {
                                     <span class="text-[10px] text-amber-400 font-sans">{w}</span>
                                 })}
                                 <button
@@ -649,7 +664,7 @@ fn ReviewStep(
 
                 <button
                     class="text-xs text-blue-400 hover:text-blue-300 font-sans"
-                    on:click=move |_| lots.update(|v| v.push(RwSignal::new(DraftLot::blank())))
+                    on:click=move |_| lots.update(|v| v.push(DraftLot::blank()))
                 >"+ add a lot"</button>
             </div>
 
@@ -737,11 +752,11 @@ fn ReviewStep(
 
             <div class="flex gap-2 items-center">
                 <button class="px-4 py-2 rounded text-sm border border-border text-gray-300 hover:border-gray-500 transition-colors"
-                    on:click=on_back>"Back"</button>
+                    on:click=move |_| on_back()>"Back"</button>
                 <button
                     class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm font-medium transition-colors"
                     prop:disabled=move || saving.get() || grouped.get().is_empty()
-                    on:click=on_import
+                    on:click=move |_| on_import()
                 >
                     {move || if saving.get() { "Importing…" } else { "Import" }}
                 </button>
