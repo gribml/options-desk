@@ -94,16 +94,32 @@ pub fn Disclosure(
     #[prop(optional, into)]
     detail: Option<String>,
     #[prop(default = false)] open: bool,
+    /// Externally owned open state. Supply this (with `on_toggle`) whenever the
+    /// component around the `Disclosure` is rebuilt by updates that have nothing
+    /// to do with it — a live price tick rebuilding a card, say. State held
+    /// internally would be a fresh signal each rebuild, so the section would
+    /// snap shut under the user mid-interaction.
+    #[prop(optional)]
+    open_when: Option<Signal<bool>>,
+    #[prop(optional)] on_toggle: Option<Callback<()>>,
     children: ChildrenFn,
 ) -> impl IntoView {
-    let expanded = RwSignal::new(open);
+    let local = RwSignal::new(open);
+    let expanded = Signal::derive(move || match open_when {
+        Some(s) => s.get(),
+        None => local.get(),
+    });
+    let toggle = move || match on_toggle {
+        Some(cb) => cb.run(()),
+        None => local.update(|v| *v = !*v),
+    };
     view! {
         <div class="space-y-2">
             <button
                 type="button"
                 class="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 \
                        transition-colors font-sans"
-                on:click=move |_| expanded.update(|v| *v = !*v)
+                on:click=move |_| toggle()
             >
                 <span class="inline-block w-2 text-[10px]">
                     {move || if expanded.get() { "▾" } else { "▸" }}

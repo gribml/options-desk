@@ -178,6 +178,15 @@ pub fn PortfolioPage() -> impl IntoView {
     // knows to enter a price manually instead.
     let quote_errors = RwSignal::new(HashSet::<String>::new());
 
+    // Which collapsible sections are open. Owned here rather than inside the
+    // cards because a price tick rebuilds the summary card and every row — if
+    // the state lived in those, nudging a price with the arrow keys would close
+    // whatever the user had open. Sets of ids, so nothing has to be created per
+    // position inside a reactive closure.
+    let summary_greeks_open = RwSignal::new(false);
+    let row_greeks_open = RwSignal::new(HashSet::<Uuid>::new());
+    let row_trades_open = RwSignal::new(HashSet::<Uuid>::new());
+
     // Apply latest bars to market_data (shared by both initial load and refresh).
     let apply_bars = move |bars: Vec<LatestBar>| {
         market_data.update(|map| {
@@ -494,7 +503,8 @@ pub fn PortfolioPage() -> impl IntoView {
 
             // ── Portfolio summary ───────────────────────────────────────────
             {move || summary.get().has_data.then(|| view! {
-                <SummaryCard summary=summary.get() total_tax=total_tax total_tax_err=total_tax_err />
+                <SummaryCard summary=summary.get() total_tax=total_tax total_tax_err=total_tax_err
+                    greeks_open=summary_greeks_open />
             })}
 
             // ── Position rows ───────────────────────────────────────────────
@@ -533,6 +543,8 @@ pub fn PortfolioPage() -> impl IntoView {
                                     position=p
                                     metrics=m
                                     implied_tax=implied_tax
+                                    greeks_open=row_greeks_open
+                                    trades_open=row_trades_open
                                     on_delete=move || {
                                         let token = auth.token.get().unwrap_or_default();
                                         spawn_local(async move {
@@ -752,6 +764,7 @@ fn SummaryCard(
     summary: PortfolioSummary,
     total_tax: RwSignal<Option<f64>>,
     total_tax_err: RwSignal<Option<String>>,
+    greeks_open: RwSignal<bool>,
 ) -> impl IntoView {
     let pnl_class = if summary.total_pnl >= 0.0 { "text-green-400" } else { "text-red-400" };
 
@@ -816,6 +829,8 @@ fn SummaryCard(
             <div class="border-t border-border pt-3">
                 <Disclosure
                     summary="What moves this portfolio"
+                    open_when=Signal::derive(move || greeks_open.get())
+                    on_toggle=Callback::new(move |_| greeks_open.update(|v| *v = !*v))
                     detail="These describe what your holdings actually react to. Delta is the one \
                             most people want: it's roughly the dollar change for a $1 move in the \
                             underlying stock."
@@ -866,13 +881,17 @@ fn PositionRow(
     position: Position,
     metrics: Option<PositionMetrics>,
     implied_tax: RwSignal<HashMap<Uuid, f64>>,
+    greeks_open: RwSignal<HashSet<Uuid>>,
+    trades_open: RwSignal<HashSet<Uuid>>,
     on_delete: impl Fn() + 'static,
     #[prop(into)] on_update: Callback<Position>,
 ) -> impl IntoView {
     let is_option = position.kind == PositionKind::Option;
     let pid = position.id;
     let is_trade_log = position.entry_mode == PositionEntryMode::TradeLog;
-    let show_trades = RwSignal::new(false);
+    // Page-owned, same reason as the greeks section: this row is rebuilt on
+    // every price tick.
+    let show_trades = Signal::derive(move || trades_open.get().contains(&pid));
 
     let kind_label = match &position.kind {
         PositionKind::Stock => "Stock".to_string(),
@@ -1009,6 +1028,10 @@ fn PositionRow(
                     <div class="pl-14">
                         <Disclosure
                             summary="What moves this position"
+                            open_when=Signal::derive(move || greeks_open.get().contains(&pid))
+                            on_toggle=Callback::new(move |_| greeks_open.update(|s| {
+                                if !s.insert(pid) { s.remove(&pid); }
+                            }))
                             detail="Each number is the dollar change in this position for a one-unit \
                                     move in the thing named."
                         >
@@ -1040,7 +1063,9 @@ fn PositionRow(
                     <div>
                         <button
                             class="text-xs text-gray-500 hover:text-gray-300 transition-colors pl-14 font-sans"
-                            on:click=move |_| show_trades.update(|v| *v = !*v)
+                            on:click=move |_| trades_open.update(|s| {
+                                if !s.insert(pid) { s.remove(&pid); }
+                            })
                         >
                             {move || if show_trades.get() {
                                 "▾ Individual purchases and sales"
@@ -1414,6 +1439,7 @@ fn AddPositionForm(
                 // page-by-page. Merge each page into the dropdowns as it arrives.
                 let mut acc: Vec<OptionMetaEntry> = Vec::new();
                 let mut page_token: Option<String> = None;
+                let mut complete = false;
                 loop {
                     match market::fetch_option_chain_live(&tok, &sym, page_token.as_deref()).await {
                         Ok(page) => {
@@ -1427,13 +1453,19 @@ fn AddPositionForm(
                             option_meta.set(acc.clone());
                             match page.next_page_token {
                                 Some(t) => page_token = Some(t),
-                                None => break,
+                                None => { complete = true; break; }
                             }
                         }
                         Err(_) => break,
                     }
                 }
-                store.option_meta.update(|map| { map.insert(sym.clone(), acc); });
+                // Only cache a chain walked all the way to its last page. Caching
+                // a half-fetched one pins the truncated list for the rest of the
+                // session, which is why the strikes on offer could differ between
+                // one load and the next.
+                if complete {
+                    store.option_meta.update(|map| { map.insert(sym.clone(), acc); });
+                }
             });
         } else {
             option_meta.set(vec![]);
@@ -1586,19 +1618,14 @@ fn AddPositionForm(
                 {move || (kind.get() == PositionKind::Option).then(|| {
                     let meta = option_meta.get();
 
-                    let mut seen = std::collections::HashSet::new();
-                    let mut expiries: Vec<String> = meta.iter()
-                        .filter_map(|e| seen.insert(e.expiry.clone()).then_some(e.expiry.clone()))
-                        .collect();
-                    expiries.sort();
+                    let expiries = crate::models::market::live_expiries(
+                        &meta,
+                        chrono::Local::now().date_naive(),
+                    );
 
                     let type_str = if opt_type.get() == OptionType::Call { "call" } else { "put" };
                     let sel_exp = expiry.get();
-                    let mut strikes: Vec<f64> = meta.iter()
-                        .filter(|e| e.expiry == sel_exp && e.option_type == type_str)
-                        .map(|e| e.strike)
-                        .collect();
-                    strikes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let strikes = crate::models::market::live_strikes(&meta, &sel_exp, type_str);
 
                     view! {
                         <>

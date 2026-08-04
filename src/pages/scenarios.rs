@@ -992,25 +992,12 @@ fn TradeEntryRow(
     });
 
     let expiries = Memo::new(move |_| {
-        let mut seen = std::collections::HashSet::new();
-        let mut v: Vec<String> = option_meta.get()
-            .into_iter()
-            .filter_map(|e| seen.insert(e.expiry.clone()).then_some(e.expiry))
-            .collect();
-        v.sort();
-        v
+        crate::models::market::live_expiries(&option_meta.get(), chrono::Local::now().date_naive())
     });
 
     let strikes = Memo::new(move |_| {
         let type_str = if entry.opt_type.get() == OptionType::Call { "call" } else { "put" };
-        let sel_exp = entry.expiry.get();
-        let mut v: Vec<f64> = option_meta.get()
-            .into_iter()
-            .filter(|e| e.expiry == sel_exp && e.option_type == type_str)
-            .map(|e| e.strike)
-            .collect();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        v
+        crate::models::market::live_strikes(&option_meta.get(), &entry.expiry.get(), type_str)
     });
 
     let on_closes_change = {

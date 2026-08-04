@@ -80,6 +80,9 @@ fn BsPricer() -> impl IntoView {
     let expiry_days = RwSignal::new("30".to_string());
     let opt_type = RwSignal::new(OptionType::Call);
     let market_price = RwSignal::new("".to_string());
+    // Owned out here: the result card below is rebuilt on every keystroke, so a
+    // section holding its own open state would close as soon as you typed.
+    let greeks_open = RwSignal::new(false);
 
     let result = Memo::new(move |_| {
         let inputs = BsInputs {
@@ -171,6 +174,8 @@ fn BsPricer() -> impl IntoView {
                     <div class="border-t border-border pt-3">
                         <Disclosure
                             summary="What would change this price"
+                            open_when=Signal::derive(move || greeks_open.get())
+                            on_toggle=Callback::new(move |_| greeks_open.update(|v| *v = !*v))
                             detail="Each row is how much the per-share price moves when one thing \
                                     changes and everything else stays put."
                         >
@@ -573,10 +578,7 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
 
     // Distinct expiries from the loaded metadata (for the leg dropdowns).
     let expiries = Memo::new(move |_| {
-        let mut v: Vec<String> = combo.meta.get().iter().map(|e| e.expiry.clone()).collect();
-        v.sort();
-        v.dedup();
-        v
+        crate::models::market::live_expiries(&combo.meta.get(), chrono::Local::now().date_naive())
     });
 
     let store = use_context::<MarketStore>().expect("MarketStore missing");
@@ -600,12 +602,16 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                 combo.spot.set(format!("{:.2}", bar.close));
             }
 
+            // Stays true on the pipeline path (a single response is whole); only
+            // the paged fallback below can leave it half-fetched.
+            let mut complete = true;
             let meta = if let Some(cached) = store.option_meta.get_untracked().get(&sym).cloned() {
                 cached
             } else {
                 // Prefer the pipeline-populated chain when it covers this symbol.
                 let mut m = market::fetch_option_meta(&tok, &sym).await.unwrap_or_default();
                 if m.is_empty() {
+                    complete = false;
                     // No pipeline data — fall back to the on-demand live chain
                     // (15-min cache or page-by-page fetch), merging as it arrives.
                     let mut acc: Vec<OptionMetaEntry> = Vec::new();
@@ -623,7 +629,7 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                                 combo.meta.set(acc.clone());
                                 match page.next_page_token {
                                     Some(t) => page_token = Some(t),
-                                    None => break,
+                                    None => { complete = true; break; }
                                 }
                             }
                             Err(_) => break,
@@ -631,7 +637,11 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                     }
                     m = acc;
                 }
-                store.option_meta.update(|map| { map.insert(sym.clone(), m.clone()); });
+                // See portfolio.rs: a half-walked chain must not be cached, or the
+                // truncated list sticks for the rest of the session.
+                if complete {
+                    store.option_meta.update(|map| { map.insert(sym.clone(), m.clone()); });
+                }
                 m
             };
             combo.meta.set(meta.clone());
@@ -892,9 +902,18 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                                         on:change=move |ev| { leg.expiry.set(event_target_value(&ev)); leg.strike.set(String::new()); }
                                     >
                                         <option value="">"— expiry —"</option>
-                                        {move || expiries.get().into_iter()
-                                            .map(|e| view! { <option value=e.clone()>{e.clone()}</option> })
-                                            .collect_view()}
+                                        // A saved combo can name an expiry that has since passed and
+                                        // is no longer offered. Keep it in the list so the leg still
+                                        // shows what it is, rather than blanking itself out.
+                                        {move || {
+                                            let list = expiries.get();
+                                            let current = leg.expiry.get_untracked();
+                                            let keep = !current.is_empty() && !list.contains(&current);
+                                            list.into_iter()
+                                                .chain(keep.then_some(current))
+                                                .map(|e| view! { <option value=e.clone()>{e.clone()}</option> })
+                                                .collect_view()
+                                        }}
                                     </select>
                                     <select class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
                                         prop:value=move || leg.strike.get()
@@ -903,13 +922,9 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                                         <option value="">"— strike —"</option>
                                         {move || {
                                             let ts = if leg.option_type.get() == OptionType::Call { "call" } else { "put" };
-                                            let sel = leg.expiry.get();
-                                            let mut ks: Vec<f64> = combo.meta.get().iter()
-                                                .filter(|e| e.expiry == sel && e.option_type == ts)
-                                                .map(|e| e.strike)
-                                                .collect();
-                                            ks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                                            ks.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+                                            let ks = crate::models::market::live_strikes(
+                                                &combo.meta.get(), &leg.expiry.get(), ts,
+                                            );
                                             ks.into_iter().map(|s| {
                                                 let val = format!("{}", s);
                                                 view! { <option value=val.clone()>{format!("${:.0}", s)}</option> }

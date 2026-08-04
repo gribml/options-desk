@@ -21,6 +21,44 @@ pub struct OptionMetaEntry {
     pub strike: f64,
 }
 
+/// Distinct expiries in `meta` that haven't passed, sorted ascending.
+///
+/// The `option_chain` table holds dated snapshots and is never pruned, so it
+/// still carries contracts that expired months ago. Those must not reach a
+/// picker: you can't open a position in a dead contract, and offering one
+/// invites a scenario built on an instrument that no longer exists. Today
+/// itself counts as live — an option is tradeable right up to expiry.
+/// Distinct strikes for one expiry and option type, ascending.
+///
+/// `option_chain` is keyed by `(snapshot_time, symbol)`, so the same contract
+/// appears once per snapshot the pipeline has taken. Without deduping, a picker
+/// lists the same strike over and over.
+pub fn live_strikes(meta: &[OptionMetaEntry], expiry: &str, option_type: &str) -> Vec<f64> {
+    let mut v: Vec<f64> = meta
+        .iter()
+        .filter(|e| e.expiry == expiry && e.option_type == option_type)
+        .map(|e| e.strike)
+        .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    v
+}
+
+pub fn live_expiries(meta: &[OptionMetaEntry], today: chrono::NaiveDate) -> Vec<String> {
+    let mut v: Vec<String> = meta
+        .iter()
+        .filter(|e| {
+            chrono::NaiveDate::parse_from_str(&e.expiry, "%Y-%m-%d")
+                .map(|d| d >= today)
+                .unwrap_or(false)
+        })
+        .map(|e| e.expiry.clone())
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ForwardVolResult {
     pub forward_vol: f64,
