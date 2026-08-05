@@ -793,7 +793,7 @@ fn ScenarioForm(
                 <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto_auto] gap-2 items-center text-xs text-gray-500 font-sans">
                     <span>"Symbol"</span>
                     <span class="flex items-center gap-1">"Price" <Info term="spot" /></span>
-                    <span class="flex items-center gap-1">"Swing %" <Info term="implied-vol" /></span>
+                    <span class="flex items-center gap-1">"Volatility %" <Info term="implied-vol" /></span>
                     <span class="flex items-center gap-1">"Rate %" <Info term="risk-free-rate" align_end=true /></span>
                     <span/><span/>
                 </div>
@@ -1170,7 +1170,7 @@ fn TradeEntryRow(
                     // Forward vol badge — appears once the SABR surface has data.
                     {move || fwd_vol.get().map(|v| view! {
                         <span class="inline-flex items-center gap-1 text-xs font-mono text-indigo-300 px-1.5 py-0.5 bg-indigo-900/30 border border-indigo-800/50 rounded">
-                            {format!("{:.1}% expected swing", v * 100.0)}
+                            {format!("{:.1}% volatility", v * 100.0)}
                             <Info term="forward-vol" />
                         </span>
                     })}

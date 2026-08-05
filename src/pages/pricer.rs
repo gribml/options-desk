@@ -143,7 +143,7 @@ fn BsPricer() -> impl IntoView {
             <div class="grid grid-cols-2 gap-4">
                 <InputField label="Stock price today" term="spot" signal=spot placeholder="100" />
                 <InputField label="Strike price" term="strike" signal=strike placeholder="100" />
-                <InputField label="Expected swing (% a year)" term="volatility" signal=vol placeholder="25" />
+                <InputField label="Volatility (% a year)" term="volatility" signal=vol placeholder="25" />
                 <InputField label="Days until it expires" term="expiry" signal=expiry_days placeholder="30" />
             </div>
 
@@ -982,7 +982,7 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                             </div>
                             <div>
                                 <label class="flex items-center gap-1 text-xs text-gray-400 mb-1 font-sans">
-                                    "Expected swing" <Info term="volatility" />
+                                    "Volatility" <Info term="volatility" />
                                     <span class="text-gray-200 font-mono">{move || format!("{}%", combo.vol.get())}</span>
                                 </label>
                                 <input type="range" min="1" max="150" step="1" class="w-full"

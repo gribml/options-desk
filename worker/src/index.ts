@@ -706,6 +706,7 @@ export default {
         if (path === '/term-rates' && request.method === 'GET') return handleTermRates(url, env);
         if (path === '/latest-bar' && request.method === 'GET') return handleLatestBar(url, env);
         if (path === '/tax' && request.method === 'POST') return handleTax(request, user, authHeader, env);
+        if (path === '/ai/discuss')
 
         return jsonResp({ error: 'Not found' }, 404);
       })();
