@@ -836,8 +836,12 @@ fn ScenarioForm(
                                     if key == "ArrowUp" || key == "ArrowDown" {
                                         ev.prevent_default();
                                         let dir = if key == "ArrowUp" { 1.0_f64 } else { -1.0_f64 };
+                                        // A dollar a press, matching the portfolio's
+                                        // price field. Stepping by a percentage made
+                                        // the increment depend on the price, so the
+                                        // same keypress moved a $600 stock by $6.
                                         if let Ok(p) = price_sig.get().trim().parse::<f64>() {
-                                            price_sig.set(format!("{:.2}", (p * (1.0 + dir * 0.01)).max(0.0)));
+                                            price_sig.set(format!("{:.2}", (p + dir).max(0.0)));
                                             market_touched.set(true);
                                         }
                                     }
@@ -927,7 +931,7 @@ fn ScenarioForm(
                 class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm font-medium"
                 prop:disabled=move || saving.get()
             >
-                {move || if saving.get() { "Saving…" } else if is_edit { "Save changes" } else { "Work out the result" }}
+                {move || if saving.get() { "Saving…" } else if is_edit { "Save changes" } else { "Calculate" }}
             </button>
         </form>
     }
