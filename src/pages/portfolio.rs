@@ -479,7 +479,6 @@ pub fn PortfolioPage() -> impl IntoView {
             Some(slot) => *slot = p,
             None => ps.push(p),
         });
-        panel.set(None);
         resync_tax();
 
         if let Some(cached) = store.quotes.get_untracked().get(&sym).cloned() {
@@ -528,17 +527,27 @@ pub fn PortfolioPage() -> impl IntoView {
                         title="Record a buy or sell — new or against something you already hold"
                         on:click=move |_| toggle_panel(EntryPanel::Trade)
                     >
-                        {move || if panel.get() == Some(EntryPanel::Trade) { "Cancel" } else { "+ Add trade" }}
+                        {move || if panel.get() == Some(EntryPanel::Trade) { "Close" } else { "+ Add trades" }}
                     </button>
                 </div>
             </div>
 
             {move || match panel.get() {
+                // The trade panel stays open — several trades in a row is the
+                // normal case. The position form is one-and-done.
                 Some(EntryPanel::Trade) => view! {
-                    <AddTradeForm auth=auth positions=positions on_saved=on_position_saved />
+                    <AddTradeForm
+                        auth=auth
+                        positions=positions
+                        on_saved=on_position_saved
+                        on_close=move |_| panel.set(None)
+                    />
                 }.into_any(),
                 Some(EntryPanel::Position) => view! {
-                    <AddPositionForm auth=auth on_added=on_position_saved />
+                    <AddPositionForm auth=auth on_added=move |p: Position| {
+                        on_position_saved(p);
+                        panel.set(None);
+                    } />
                 }.into_any(),
                 None => ().into_any(),
             }}
@@ -571,7 +580,7 @@ pub fn PortfolioPage() -> impl IntoView {
                         class="px-4 py-2 rounded text-sm font-medium border border-border text-gray-300 hover:border-gray-500 transition-colors"
                         on:click=move |_| panel.set(Some(EntryPanel::Trade))
                     >
-                        "Add a trade by hand"
+                        "Add trades by hand"
                     </button>
                 </EmptyState>
             })}
@@ -1535,7 +1544,7 @@ fn KindToggle(kind: RwSignal<PositionKind>) -> impl IntoView {
                 view! {
                     <button type="button"
                         class=move || format!(
-                            "px-4 py-1 rounded text-xs border transition-colors {}",
+                            "px-4 py-1.5 rounded text-xs border transition-colors {}",
                             if kind.get() == k2 { "bg-blue-600 border-blue-600 text-white" }
                             else { "bg-surface border-border text-gray-400" }
                         )
@@ -1548,14 +1557,21 @@ fn KindToggle(kind: RwSignal<PositionKind>) -> impl IntoView {
 }
 
 /// Call/Put toggle plus expiry and strike pickers fed from the live chain.
-/// Renders as three cells of the enclosing two-column grid.
+/// By default renders as three cells of an enclosing two-column grid; with
+/// `inline` it becomes three fixed-width cells for a single-row form.
 #[component]
 fn OptionContractFields(
     opt_type: RwSignal<OptionType>,
     expiry: RwSignal<String>,
     strike: RwSignal<String>,
     option_meta: RwSignal<Vec<OptionMetaEntry>>,
+    #[prop(default = false)] inline: bool,
 ) -> impl IntoView {
+    let toggle_wrap = if inline { "flex gap-2 shrink-0" } else { "col-span-2 flex gap-2" };
+    let expiry_cls = if inline { "w-32 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500" }
+                     else { "w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500" };
+    let strike_cls = if inline { "w-24 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500" }
+                     else { expiry_cls };
     move || {
         let meta = option_meta.get();
         let expiries = crate::models::market::live_expiries(
@@ -1568,7 +1584,7 @@ fn OptionContractFields(
 
         view! {
             <>
-                <div class="col-span-2 flex gap-2">
+                <div class=toggle_wrap>
                     {[OptionType::Call, OptionType::Put].map(|t| view! {
                         <button type="button"
                             class=move || format!(
@@ -1583,7 +1599,7 @@ fn OptionContractFields(
                 <div>
                     <label class="block text-xs text-gray-400 mb-1">"Expiry"</label>
                     <select
-                        class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                        class=expiry_cls
                         prop:value=move || expiry.get()
                         on:change=move |ev| {
                             expiry.set(event_target_value(&ev));
@@ -1599,7 +1615,7 @@ fn OptionContractFields(
                 <div>
                     <label class="block text-xs text-gray-400 mb-1">"Strike"</label>
                     <select
-                        class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                        class=strike_cls
                         prop:value=move || strike.get()
                         on:change=move |ev| strike.set(event_target_value(&ev))
                     >
@@ -1617,15 +1633,17 @@ fn OptionContractFields(
 
 // ── Add trade form ────────────────────────────────────────────────────────────
 
-/// Record one buy or sell. The trade goes to the position that already holds
-/// that instrument if there is one, otherwise a new trade-log position is
-/// opened for it — so this is also the quickest way to add something new with
-/// its purchase date intact.
+/// Record buys and sells, one per row, as many as you like. Each trade goes
+/// to the position that already holds that instrument if there is one,
+/// otherwise a new trade-log position is opened for it — so this is also the
+/// quickest way to add something new with its purchase date intact. The
+/// panel stays open between trades and lists what it has added so far.
 #[component]
 fn AddTradeForm(
     auth: AuthState,
     positions: RwSignal<Vec<Position>>,
     #[prop(into)] on_saved: Callback<Position>,
+    #[prop(into)] on_close: Callback<()>,
 ) -> impl IntoView {
     let symbol   = RwSignal::new(String::new());
     let kind     = RwSignal::new(PositionKind::Stock);
@@ -1638,6 +1656,8 @@ fn AddTradeForm(
     let expiry   = RwSignal::new(String::new());
     let err      = RwSignal::new(Option::<String>::None);
     let saving   = RwSignal::new(false);
+    // What this panel has recorded since it opened, newest first.
+    let added    = RwSignal::new(Vec::<String>::new());
 
     let option_meta = use_option_meta(
         auth,
@@ -1763,42 +1783,73 @@ fn AddTradeForm(
             });
         pos.record_trade(trade);
 
+        let summary = format!(
+            "{} {} {}{} @ ${:.2} on {}",
+            if is_buy.get() { "Bought" } else { "Sold" },
+            qty,
+            sym,
+            match &spec {
+                Some(s) => format!(" {} ${:.0} {}", s.option_type.label(), s.strike, s.expiry.format("%d-%b-%y")),
+                None => String::new(),
+            },
+            px,
+            d.format("%-d %b %Y"),
+        );
+
         saving.set(true);
         let token = auth.token.get_untracked().unwrap_or_default();
         let user_id = auth.user_id.get_untracked().unwrap_or_default();
         spawn_local(async move {
             match supabase::upsert_position(&token, &user_id, &pos).await {
-                Ok(_) => on_saved.run(pos),
-                Err(e) => { err.set(Some(e)); saving.set(false); }
+                Ok(_) => {
+                    on_saved.run(pos);
+                    added.update(|v| v.insert(0, summary));
+                    // Symbol, side, date and contract are usually the same for
+                    // the next one; the amounts never are.
+                    quantity.set(String::new());
+                    price.set(String::new());
+                }
+                Err(e) => err.set(Some(e)),
             }
+            saving.set(false);
         });
     };
 
     view! {
         <form on:submit=on_submit class="bg-panel border border-border rounded-xl p-6 space-y-4">
-            <h2 class="text-sm font-medium text-gray-300">"Add trade"</h2>
-
-            <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
-                <KindToggle kind=kind />
-                <div class="flex rounded overflow-hidden border border-border text-xs">
-                    {[(true, "Buy"), (false, "Sell")].map(|(b, label)| view! {
-                        <button type="button"
-                            class=move || if is_buy.get() == b {
-                                "px-3 py-1 bg-blue-600 text-white"
-                            } else {
-                                "px-3 py-1 text-gray-400 hover:text-gray-200"
-                            }
-                            on:click=move |_| is_buy.set(b)
-                        >{label}</button>
-                    })}
-                </div>
+            <div class="flex items-center justify-between">
+                <h2 class="text-sm font-medium text-gray-300">"Add trades"</h2>
+                <button type="button"
+                    class="text-xs text-gray-500 hover:text-gray-300 transition-colors font-sans"
+                    on:click=move |_| on_close.run(())
+                >"Done"</button>
             </div>
 
-            <div class="grid grid-cols-2 gap-3">
+            // One row per trade: everything that describes it, left to right.
+            <div class="flex flex-wrap items-end gap-2">
+                <div class="shrink-0">
+                    <label class="block text-xs text-gray-400 mb-1">"Type"</label>
+                    <KindToggle kind=kind />
+                </div>
+                <div class="shrink-0">
+                    <label class="block text-xs text-gray-400 mb-1">"Side"</label>
+                    <div class="flex rounded overflow-hidden border border-border text-xs">
+                        {[(true, "Buy"), (false, "Sell")].map(|(b, label)| view! {
+                            <button type="button"
+                                class=move || if is_buy.get() == b {
+                                    "px-3 py-1.5 bg-blue-600 text-white"
+                                } else {
+                                    "px-3 py-1.5 text-gray-400 hover:text-gray-200"
+                                }
+                                on:click=move |_| is_buy.set(b)
+                            >{label}</button>
+                        })}
+                    </div>
+                </div>
                 <div>
                     <label class="block text-xs text-gray-400 mb-1">"Symbol"</label>
                     <input
-                        class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                        class="w-24 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
                         list="held-symbols"
                         prop:value=move || symbol.get()
                         on:input=move |ev| symbol.set(event_target_value(&ev))
@@ -1811,23 +1862,33 @@ fn AddTradeForm(
                     </datalist>
                 </div>
                 <div>
+                    <label class="block text-xs text-gray-400 mb-1">
+                        {move || if kind.get() == PositionKind::Option { "Contracts" } else { "Shares" }}
+                    </label>
+                    <input
+                        class="w-20 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                        prop:value=move || quantity.get()
+                        on:input=move |ev| quantity.set(event_target_value(&ev))
+                        placeholder="100"
+                    />
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1">"Price / share"</label>
+                    <input
+                        class="w-24 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                        prop:value=move || price.get()
+                        on:input=move |ev| price.set(event_target_value(&ev))
+                        placeholder="0.00"
+                    />
+                </div>
+                <div>
                     <label class="block text-xs text-gray-400 mb-1">"Date"</label>
                     <input type="date"
-                        class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                        class="w-36 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
                         prop:value=move || date.get()
                         on:input=move |ev| date.set(event_target_value(&ev))
                     />
                 </div>
-                <MiniInput
-                    label="Quantity"
-                    signal=quantity
-                    ph="100"
-                />
-                <MiniInput
-                    label="Price / share"
-                    signal=price
-                    ph="0.00"
-                />
 
                 {move || (kind.get() == PositionKind::Option).then(|| view! {
                     <OptionContractFields
@@ -1835,27 +1896,44 @@ fn AddTradeForm(
                         expiry=expiry
                         strike=strike
                         option_meta=option_meta
+                        inline=true
                     />
                 })}
+
+                <button type="submit"
+                    class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-1.5 rounded text-sm font-medium shrink-0"
+                    prop:disabled=move || saving.get()
+                >
+                    {move || if saving.get() { "Saving…" } else { "Add" }}
+                </button>
             </div>
 
             <Hint>
                 {move || if kind.get() == PositionKind::Option {
-                    "Quantity is in contracts; price is the premium per share, as your broker quotes it."
+                    "Price is the premium per share, as your broker quotes it. A sell against \
+                     contracts you hold closes them."
                 } else {
-                    "Quantity is in shares. A sell is matched against what you bought first."
+                    "A sell is matched against the shares you bought first."
                 }}
             </Hint>
 
             {move || target_note().map(|n| view! { <p class="text-xs text-gray-500 font-sans">{n}</p> })}
             {move || err.get().map(|e| view! { <p class="text-red-400 text-xs">{e}</p> })}
 
-            <button type="submit"
-                class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm font-medium"
-                prop:disabled=move || saving.get()
-            >
-                {move || if saving.get() { "Saving…" } else { "Add trade" }}
-            </button>
+            // Running list of what this sitting has recorded.
+            {move || {
+                let list = added.get();
+                (!list.is_empty()).then(|| view! {
+                    <div class="border-t border-border pt-3 space-y-1">
+                        <p class="text-xs font-medium text-gray-300 font-sans">
+                            {format!("Added {} trade{}", list.len(), if list.len() == 1 { "" } else { "s" })}
+                        </p>
+                        {list.into_iter().map(|line| view! {
+                            <p class="text-xs text-gray-400 font-mono">"✓ " {line}</p>
+                        }).collect_view()}
+                    </div>
+                })
+            }}
         </form>
     }
 }
