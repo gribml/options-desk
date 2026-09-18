@@ -7,9 +7,10 @@ use crate::api::supabase;
 use crate::app::AuthState;
 use crate::components::ui::{Callout, Hint, Info, Label};
 use crate::format::fmt_cash;
+use crate::models::realized::{realized_lots, trade_gains, RealizedLot};
 use crate::models::tax::{
     DeductionChoice, FilingStatus, LineItemCategory, TaxEntryMode, TaxLineItem, TaxProfile,
-    TaxRevision, TaxSettings,
+    TaxRevision, TaxSettings, TradeGains,
 };
 
 #[component]
@@ -20,6 +21,10 @@ pub fn TaxPage() -> impl IntoView {
     let fetch_err = RwSignal::new(Option::<String>::None);
     let added_years = RwSignal::new(Vec::<u16>::new());
     let new_year_input = RwSignal::new(String::new());
+    // Gains realised by the portfolio's trade logs, every year. Shown per year
+    // below and stamped onto each profile as `trade_gains` so the Worker's
+    // baseline includes them.
+    let lots = RwSignal::new(Vec::<RealizedLot>::new());
 
     Effect::new(move |_| {
         let token = auth.token.get();
@@ -27,7 +32,17 @@ pub fn TaxPage() -> impl IntoView {
         if let (Some(tok), Some(uid)) = (token, user_id) {
             fetch_err.set(None);
             spawn_local(async move {
-                match supabase::fetch_tax_profiles(&tok, &uid).await {
+                // Reconcile stored trade gains with the trade logs on the way
+                // in, so a change made anywhere else (import, a trade added
+                // while this page was closed) shows up here.
+                let synced = match supabase::fetch_positions(&tok, &uid).await {
+                    Ok(ps) => {
+                        lots.set(realized_lots(&ps));
+                        supabase::sync_trade_gains(&tok, &uid, &ps).await
+                    }
+                    Err(_) => supabase::fetch_tax_profiles(&tok, &uid).await,
+                };
+                match synced {
                     Ok(p) => profiles.set(p),
                     Err(e) => fetch_err.set(Some(e)),
                 }
@@ -44,6 +59,11 @@ pub fn TaxPage() -> impl IntoView {
         let mut ys: Vec<u16> = vec![current_year];
         for p in profiles.get() {
             ys.push(p.tax_year);
+        }
+        for l in lots.get() {
+            if let Ok(y) = u16::try_from(l.year()) {
+                ys.push(y);
+            }
         }
         ys.extend(added_years.get());
         ys.sort_unstable();
@@ -109,11 +129,15 @@ pub fn TaxPage() -> impl IntoView {
                 years().into_iter().map(|year| {
                     let existing = profiles.get().into_iter().find(|p| p.tax_year == year);
                     let default_expanded = year == current_year;
+                    let year_lots = Signal::derive(move || {
+                        lots.get().into_iter().filter(|l| l.year() == year as i32).collect::<Vec<_>>()
+                    });
                     view! {
                         <YearSection
                             auth=auth
                             year=year
                             existing=existing
+                            lots=year_lots
                             default_expanded=default_expanded
                             on_saved=move |saved: TaxProfile| {
                                 profiles.update(|ps| {
@@ -137,11 +161,16 @@ fn YearSection(
     auth: AuthState,
     year: u16,
     existing: Option<TaxProfile>,
+    /// Closed lots from the trade logs that fall in this year.
+    lots: Signal<Vec<RealizedLot>>,
     default_expanded: bool,
     #[prop(into)] on_saved: Callback<TaxProfile>,
 ) -> impl IntoView {
     let expanded = RwSignal::new(default_expanded);
     let profile_id = RwSignal::new(existing.as_ref().map(|p| p.id));
+    // Every profile written from this section carries the current figure, so
+    // creating or re-saving a year never drops what the trade logs realised.
+    let gains = Memo::new(move |_| trade_gains(&lots.get()));
     let revisions = RwSignal::new(existing.as_ref().map(|p| p.revisions.clone()).unwrap_or_default());
     let mode = RwSignal::new(existing.as_ref().map(|p| p.mode).unwrap_or_default());
     let settings = RwSignal::new(existing.as_ref().map(|p| p.settings.clone()).unwrap_or_default());
@@ -207,7 +236,7 @@ fn YearSection(
         revisions.update(|rs| rs.retain(|r| r.entered_at != entered_at));
         let cur = revisions.get_untracked().last().cloned().unwrap_or_default();
         apply_revision_to_form(cur);
-        let profile = TaxProfile { id, tax_year: year, revisions: revisions.get_untracked(), mode: mode.get_untracked(), settings: settings.get_untracked(), line_items: line_items.get_untracked() };
+        let profile = TaxProfile { id, tax_year: year, revisions: revisions.get_untracked(), mode: mode.get_untracked(), settings: settings.get_untracked(), line_items: line_items.get_untracked(), trade_gains: gains.get_untracked() };
         spawn_local(async move {
             let _ = supabase::upsert_tax_profile(&token, &user_id, &profile).await;
         });
@@ -250,7 +279,7 @@ fn YearSection(
         let id = profile_id.get().unwrap_or_else(Uuid::new_v4);
         let mut all = revisions.get();
         all.push(rev.clone());
-        let profile = TaxProfile { id, tax_year: year, revisions: all, mode: mode.get_untracked(), settings: settings.get_untracked(), line_items: line_items.get_untracked() };
+        let profile = TaxProfile { id, tax_year: year, revisions: all, mode: mode.get_untracked(), settings: settings.get_untracked(), line_items: line_items.get_untracked(), trade_gains: gains.get_untracked() };
 
         let token = auth.token.get().unwrap_or_default();
         let user_id = auth.user_id.get().unwrap_or_default();
@@ -279,6 +308,7 @@ fn YearSection(
             mode: new_mode,
             settings: settings.get_untracked(),
             line_items: line_items.get_untracked(),
+            trade_gains: gains.get_untracked(),
         };
         profile.sync_revisions();
         revisions.set(profile.revisions.clone());
@@ -404,8 +434,10 @@ fn YearSection(
                                         <MoneyField label="Losses carried forward (long)" term=Some("carryforward-loss") signal=cf_lt />
                                     </div>
                                     <Hint>
-                                        "Gains you've already booked this year, not what you're still holding. \
-                                         Enter carried-forward losses as positive numbers."
+                                        "Gains you've already booked this year outside Martingale, not what \
+                                         you're still holding. Trades logged on the Portfolio page are added \
+                                         on top automatically — see the bottom of this section. Enter \
+                                         carried-forward losses as positive numbers."
                                     </Hint>
                                 </div>
 
@@ -434,10 +466,13 @@ fn YearSection(
                                 settings=settings
                                 line_items=line_items
                                 revisions=revisions
+                                gains=gains
                                 on_saved=on_saved
                             />
                         }.into_any(),
                     }}
+
+                    <RealizedFromTrades lots=lots />
                 </div>
             })}
         </div>
@@ -454,6 +489,7 @@ fn LineItemModeView(
     settings: RwSignal<TaxSettings>,
     line_items: RwSignal<Vec<TaxLineItem>>,
     revisions: RwSignal<Vec<TaxRevision>>,
+    gains: Memo<TradeGains>,
     #[prop(into)] on_saved: Callback<TaxProfile>,
 ) -> impl IntoView {
     // Local form signals for personal settings
@@ -483,6 +519,7 @@ fn LineItemModeView(
             mode: TaxEntryMode::LineItem,
             settings: settings.get_untracked(),
             line_items: line_items.get_untracked(),
+            trade_gains: gains.get_untracked(),
         };
         profile.sync_revisions();
         revisions.set(profile.revisions.clone());
@@ -627,8 +664,9 @@ fn AddLineItemRow(#[prop(into)] on_add: Callback<TaxLineItem>) -> impl IntoView 
         <div class="space-y-2">
             <p class="text-xs font-medium text-gray-300 font-sans">"Add an entry"</p>
             <Hint>
-                "Log each amount as it lands — a paycheck, a dividend, a realised gain. The totals \
-                 build up underneath and feed every estimate elsewhere."
+                "Log each amount as it lands — a paycheck, a dividend, a gain booked elsewhere. \
+                 Sales logged on the Portfolio page are counted automatically, so don't repeat \
+                 those here. The totals build up underneath and feed every estimate elsewhere."
             </Hint>
             <div class="flex flex-wrap gap-2 items-end">
                 <div>
@@ -764,6 +802,77 @@ fn LineItemsList(
                     </div>
                 </div>
             }.into_any()
+        }}
+    }
+}
+
+// ── Realised from the trade logs ─────────────────────────────────────────────
+
+/// The closings the Portfolio page's trade logs put in this year, and their
+/// short/long-term split. Read-only: the way to change one is to edit the
+/// trade it came from.
+#[component]
+fn RealizedFromTrades(lots: Signal<Vec<RealizedLot>>) -> impl IntoView {
+    view! {
+        {move || {
+            let ls = lots.get();
+            if ls.is_empty() {
+                return None;
+            }
+            let g = trade_gains(&ls);
+            let cls = |v: f64| if v >= 0.0 { "text-green-400" } else { "text-red-400" };
+            Some(view! {
+                <div class="space-y-2 border-t border-border pt-4">
+                    <div class="flex items-center gap-1.5">
+                        <p class="text-xs font-medium text-gray-300 font-sans">"Realised by trades logged in Martingale"</p>
+                        <Info term="trade-gains" />
+                    </div>
+                    <Hint>
+                        "Each sale is matched against the oldest shares first. Stock held over a year \
+                         is long-term; an option is always short-term. These are added to the figures \
+                         above automatically — to change one, edit the trade on the Portfolio page."
+                    </Hint>
+                    <div class="grid gap-x-4 gap-y-0.5 text-xs items-baseline"
+                        style="grid-template-columns: auto auto auto auto auto auto">
+                        <span class="text-gray-500 font-sans">"Closed"</span>
+                        <span class="text-gray-500 font-sans">"What"</span>
+                        <span class="text-gray-500 font-sans text-right">"Qty"</span>
+                        <span class="text-gray-500 font-sans text-right">"In → out"</span>
+                        <span class="text-gray-500 font-sans text-right">"Held"</span>
+                        <span class="text-gray-500 font-sans text-right">"Gain"</span>
+                        {ls.iter().map(|l| {
+                            let days = (l.close_date - l.open_date).num_days();
+                            let term_cls = if l.is_long_term { "text-green-500" } else { "text-gray-400" };
+                            view! {
+                                <span class="text-gray-400">{l.close_date.format("%b %-d").to_string()}</span>
+                                <span class="text-gray-300">
+                                    {l.symbol.clone()}
+                                    <span class="text-gray-500">{format!(" {}", l.instrument)}</span>
+                                </span>
+                                <span class="text-right font-mono">{l.quantity}</span>
+                                <span class="text-right font-mono text-gray-400">
+                                    {format!("${:.2} → ${:.2}", l.open_price, l.close_price)}
+                                </span>
+                                <span class=format!("text-right {}", term_cls)>
+                                    {format!("{days}d")}
+                                    <span class="ml-1 text-[10px] font-sans">
+                                        {if l.is_long_term { "long-term" } else { "short-term" }}
+                                    </span>
+                                </span>
+                                <span class=format!("text-right font-mono {}", cls(l.gain))>{fmt_cash(l.gain)}</span>
+                            }
+                        }).collect_view()}
+                    </div>
+                    <div class="flex justify-end gap-6 text-xs pt-1">
+                        <span class="text-gray-500 font-sans">
+                            "Short-term " <span class=format!("font-mono {}", cls(g.st))>{fmt_cash(g.st)}</span>
+                        </span>
+                        <span class="text-gray-500 font-sans">
+                            "Long-term " <span class=format!("font-mono {}", cls(g.lt))>{fmt_cash(g.lt)}</span>
+                        </span>
+                    </div>
+                </div>
+            })
         }}
     }
 }

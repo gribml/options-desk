@@ -359,3 +359,22 @@ export function sanitizeTaxInputs(raw: unknown): TaxInputs | null {
     carryforward_lt_loss: v.carryforward_lt_loss,
   };
 }
+
+// Adds the gains realised by the trade logs (`payload.trade_gains`, written
+// by the client from FIFO-matched closings) to a sanitized baseline. Kept
+// separate from the typed figures in the revision so re-saving the form can't
+// double-count them. Losses are negative and pass through — §1211(b) netting
+// happens in `computeFederalTax`. A missing or malformed field adds nothing:
+// the typed baseline is still worth pricing against.
+export function withTradeGains(baseline: TaxInputs, raw: unknown): TaxInputs {
+  if (!raw || typeof raw !== 'object') return baseline;
+  const r = raw as Record<string, unknown>;
+  const st = Number(r.st ?? 0);
+  const lt = Number(r.lt ?? 0);
+  if (!Number.isFinite(st) || !Number.isFinite(lt)) return baseline;
+  return {
+    ...baseline,
+    st_capital_gains: baseline.st_capital_gains + st,
+    lt_capital_gains: baseline.lt_capital_gains + lt,
+  };
+}

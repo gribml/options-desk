@@ -158,6 +158,46 @@ impl Position {
         }
     }
 
+    /// Record a buy or sell against this position.
+    ///
+    /// A Snapshot position becomes a TradeLog first: its one total is kept as a
+    /// single lot dated when the position was opened, so nothing it held is
+    /// lost and its holding period is unchanged — `oldest_open_lot_date()` falls
+    /// on the same day either way. Snapshot fields are zeroed so they can't be
+    /// double-counted.
+    pub fn record_trade(&mut self, trade: Trade) {
+        if self.entry_mode == PositionEntryMode::Snapshot {
+            if self.quantity != 0 {
+                self.trades.push(Trade {
+                    id: Uuid::new_v4(),
+                    date: self.opened_at.date_naive(),
+                    quantity: self.quantity,
+                    price: self.cost_basis,
+                });
+            }
+            self.entry_mode = PositionEntryMode::TradeLog;
+            self.quantity = 0;
+            self.cost_basis = 0.0;
+        }
+        self.trades.push(trade);
+    }
+
+    /// True when this position is the same instrument: same underlying and kind, and for
+    /// options the same contract. Used to route a new trade to its position.
+    pub fn same_instrument(&self, symbol: &str, kind: &PositionKind, spec: Option<&OptionSpec>) -> bool {
+        self.symbol == symbol
+            && self.kind == *kind
+            && match (self.option_spec.as_ref(), spec) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.option_type == b.option_type
+                        && a.expiry == b.expiry
+                        && (a.strike - b.strike).abs() < 1e-9
+                }
+                _ => false,
+            }
+    }
+
     /// Open/closed lots for the portfolio ledger view. Uses FIFO — the standard
     /// convention for showing which lots remain open and their holding period.
     /// The choice of allocation method only matters when realizing sales/exercises

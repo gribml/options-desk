@@ -366,3 +366,31 @@ pub async fn upsert_tax_profile(
         Err(format!("Upsert tax profile failed: {} — {}", status, body))
     }
 }
+
+/// Bring every year's `trade_gains` in line with the trade logs in `positions`.
+///
+/// Recomputes realised gains per year and rewrites only the profiles whose
+/// stored figure has drifted, so this is cheap to call after any trade change
+/// and on page load. Years with trades but no profile are left alone: the
+/// Worker can't price anything for them until the user enters their income,
+/// and the Taxes page stamps the current figure on whenever that profile is
+/// created. Returns the profiles as they now stand.
+pub async fn sync_trade_gains(
+    token: &str,
+    user_id: &str,
+    positions: &[Position],
+) -> Result<Vec<TaxProfile>, String> {
+    let lots = crate::models::realized::realized_lots(positions);
+    let by_year = crate::models::realized::trade_gains_by_year(&lots);
+
+    let mut profiles = fetch_tax_profiles(token, user_id).await?;
+    for p in profiles.iter_mut() {
+        let want = by_year.get(&(p.tax_year as i32)).copied().unwrap_or_default();
+        if p.trade_gains.approx_eq(&want) {
+            continue;
+        }
+        p.trade_gains = want;
+        upsert_tax_profile(token, user_id, p).await?;
+    }
+    Ok(profiles)
+}

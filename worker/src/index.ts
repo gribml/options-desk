@@ -2,6 +2,7 @@ import {
   computeFederalTax,
   marginalTradeTax,
   sanitizeTaxInputs,
+  withTradeGains,
   constantsFor,
   MIN_TAX_YEAR,
   type TaxInputs,
@@ -615,7 +616,7 @@ async function handleTax(
   });
   if (!resp.ok) return jsonResp({ error: 'Failed to read tax profile' }, 502);
 
-  const rows = await resp.json<Array<{ payload: { revisions?: unknown[] } }>>();
+  const rows = await resp.json<Array<{ payload: { revisions?: unknown[]; trade_gains?: unknown } }>>();
   const revisions = rows[0]?.payload?.revisions;
   if (!revisions || revisions.length === 0) {
     return jsonResp({ error: `No tax profile for ${taxYear}` }, 422);
@@ -623,10 +624,14 @@ async function handleTax(
   // A malformed stored revision (unknown filing status, non-numeric amount)
   // would otherwise throw on an undefined bracket table or return NaN, which
   // serializes to null and fails to deserialize on the client.
-  const baseline: TaxInputs | null = sanitizeTaxInputs(revisions[revisions.length - 1]);
-  if (!baseline) {
+  const typed: TaxInputs | null = sanitizeTaxInputs(revisions[revisions.length - 1]);
+  if (!typed) {
     return jsonResp({ error: `Tax profile for ${taxYear} is incomplete or invalid` }, 422);
   }
+  // Gains already realised by trades logged in the portfolio belong in the
+  // baseline too — a marginal estimate is only right against everything else
+  // booked that year.
+  const baseline = withTradeGains(typed, rows[0]?.payload?.trade_gains);
 
   const constantsYear = constantsFor(taxYear).year;
   const baselineTax = computeFederalTax(baseline, taxYear);

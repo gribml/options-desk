@@ -235,10 +235,30 @@ impl Default for TaxRevision {
     }
 }
 
+/// Capital gains realised by the trades logged in the portfolio, for one year.
+///
+/// Derived, not typed: recomputed from the trade logs (see
+/// `models::realized`) whenever they change, and stored on the profile so the
+/// Worker can add it to the baseline without needing the positions. Kept apart
+/// from the typed figures so a user re-saving the form can't double-count it.
+/// Losses are negative.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct TradeGains {
+    pub st: f64,
+    pub lt: f64,
+}
+
+impl TradeGains {
+    pub fn approx_eq(&self, other: &TradeGains) -> bool {
+        (self.st - other.st).abs() < 0.005 && (self.lt - other.lt).abs() < 0.005
+    }
+}
+
 /// A user's tax profile for a single year — stored as one Supabase row per
 /// (user, tax_year). `revisions` is append-only in snapshot mode; in line-item
 /// mode it always holds exactly one entry (the computed aggregate) so the Worker
-/// always reads a consistent `revisions.last()`.
+/// always reads a consistent `revisions.last()`. `trade_gains` sits alongside
+/// and is added to that revision by the Worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaxProfile {
     pub id: Uuid,
@@ -251,6 +271,8 @@ pub struct TaxProfile {
     pub settings: TaxSettings,
     #[serde(default)]
     pub line_items: Vec<TaxLineItem>,
+    #[serde(default)]
+    pub trade_gains: TradeGains,
 }
 
 impl TaxProfile {
@@ -262,6 +284,7 @@ impl TaxProfile {
             mode: TaxEntryMode::Snapshot,
             settings: TaxSettings::default(),
             line_items: vec![],
+            trade_gains: TradeGains::default(),
         }
     }
 

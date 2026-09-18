@@ -3,5 +3,6 @@ pub mod import;
 pub mod market;
 pub mod option;
 pub mod position;
+pub mod realized;
 pub mod scenario;
 pub mod tax;

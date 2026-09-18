@@ -6,6 +6,7 @@ import {
   marginalTradeTax,
   netCapitalGains,
   sanitizeTaxInputs,
+  withTradeGains,
   tieredTaxOnInterval,
   MAX_TAX_YEAR,
   MIN_TAX_YEAR,
@@ -520,6 +521,43 @@ describe('sanitizeTaxInputs', () => {
   it('falls back to the standard deduction for an unrecognized choice', () => {
     const s = sanitizeTaxInputs({ ...profile(), deduction_choice: 'bogus' })!;
     expect(s.deduction_choice).toBe('standard');
+  });
+});
+
+describe('withTradeGains', () => {
+  it('adds realised trade gains to the typed baseline, keeping the sign', () => {
+    const b = profile({ st_capital_gains: 1_000, lt_capital_gains: 2_000 });
+    const r = withTradeGains(b, { st: 500, lt: -3_000 });
+    expect(r.st_capital_gains).toBe(1_500);
+    expect(r.lt_capital_gains).toBe(-1_000);
+    expect(r.w2_income).toBe(b.w2_income);
+  });
+
+  it('leaves the baseline alone when the field is absent or malformed', () => {
+    const b = profile({ st_capital_gains: 1_000 });
+    expect(withTradeGains(b, undefined)).toEqual(b);
+    expect(withTradeGains(b, null)).toEqual(b);
+    expect(withTradeGains(b, 'x')).toEqual(b);
+    expect(withTradeGains(b, { st: 'lots' })).toEqual(b);
+    expect(withTradeGains(b, { st: NaN, lt: 1 })).toEqual(b);
+  });
+
+  it('treats a missing side as zero', () => {
+    const b = profile({ st_capital_gains: 1_000, lt_capital_gains: 2_000 });
+    const r = withTradeGains(b, { lt: 100 });
+    expect(r.st_capital_gains).toBe(1_000);
+    expect(r.lt_capital_gains).toBe(2_100);
+  });
+
+  it('changes the marginal tax of a further trade the way stacking should', () => {
+    // A large realised LT gain fills the 0% LT bracket, so the same extra LT
+    // gain now costs more than it would against the typed baseline alone.
+    const typed = profile({ w2_income: 20_000 });
+    const withGains = withTradeGains(typed, { st: 0, lt: 60_000 });
+    const extra = { st_gain: 0, lt_gain: 10_000 };
+    const tBefore = marginalTradeTax(typed, extra, 2025, computeFederalTax(typed, 2025));
+    const tAfter = marginalTradeTax(withGains, extra, 2025, computeFederalTax(withGains, 2025));
+    expect(tAfter).toBeGreaterThan(tBefore);
   });
 });
 

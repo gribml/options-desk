@@ -235,6 +235,11 @@ pub const TERMS: &[Definition] = &[
         body: "What you'd owe if you sold up completely. Gains and losses are added together before the tax is worked out — which is how your return actually does it — so this will not match the sum of the per-position figures above, and can land either side of it. It matters most for a covered call: as the stock climbs its gain grows without limit while the call you sold runs an equally growing loss, and the two cancel, so this total stays roughly flat. That is the truth of the position; the individual rows are the ones that mislead.",
     },
     Definition {
+        key: "trade-gains",
+        title: "Gains from your logged trades",
+        body: "When a sell on the Portfolio page closes shares you'd bought earlier, the difference is a gain (or loss) you'll owe tax on this year. Martingale works it out lot by lot — oldest shares first — and adds it to the totals here on its own, so you don't have to type it in and can't count it twice. Stock held over a year gets the lower long-term rate; an option is always short-term.",
+    },
+    Definition {
         key: "baseline-tax",
         title: "Baseline tax",
         body: "The federal tax you'd owe this year from your income profile alone, with none of these trades. It's the reference point the scenario's tax impact is measured against.",

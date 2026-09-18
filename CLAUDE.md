@@ -19,9 +19,10 @@ cd worker && npm run deploy                      # Deploy to Cloudflare Workers
 ./scripts/bars-1min.sh AAPL 2024-01-01 2024-01-02 out.json  # Curl Alpaca 1-min bars
 ```
 
-The Rust frontend has no tests. The worker's federal tax engine does:
+Tests:
 
 ```bash
+cargo test --lib                                 # Rust model tests (native target) — src/models/realized.rs
 cd worker && npm test                            # vitest — worker/test/tax.test.ts
 cd worker && npm run typecheck                   # tsc --noEmit (src + test)
 ```
@@ -67,7 +68,8 @@ Copy `.env.example` to `.env` to get started. The built WASM binary contains the
 - `src/pages/scenarios.rs` — `evaluate()` function: accumulates trade cash flows, detects option assignments, and characterises realized gains as ST/LT. `net_cash` is pre-tax; the tax figure comes from the Worker's `/tax` endpoint
 - `src/api/market.rs` — all Worker HTTP calls
 - `src/api/supabase.rs` — all Supabase REST calls (positions, scenarios, auth)
-- `worker/src/index.ts` — Cloudflare Worker: JWT verification via Supabase, D1 queries, `/tax` endpoint
+- `src/models/realized.rs` — FIFO-matches every position's trade log into closed lots and characterises them (stock: long-term past a year; options: always short-term). Their per-year totals are stored on the tax profile as `trade_gains`, kept in sync by `supabase::sync_trade_gains` from the Portfolio and Taxes pages
+- `worker/src/index.ts` — Cloudflare Worker: JWT verification via Supabase, D1 queries, `/tax` endpoint. The baseline is the profile's last revision plus `payload.trade_gains`
 - `worker/src/tax.ts` — federal tax engine (§1 brackets, §1(h) preferential stacking, §1211(b) loss netting, §1411 NIIT). Pure functions, no Worker bindings — the year constant tables need updating each year from the IRS Rev. Proc. The file header lists what is deliberately out of scope (AMT, state tax, §1256, wash sales)
 - `worker/test/tax.test.ts` — tax engine tests; expected figures are hand-computed from the published rate schedules and the Form 1040 Qualified Dividends & Capital Gain Tax Worksheet
 - `worker/schema.sql` — D1 table definitions (`bars_1min`, `option_chain`)
