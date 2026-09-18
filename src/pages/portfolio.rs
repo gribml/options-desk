@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 
 use chrono::{Datelike, NaiveDate, Utc};
 use leptos::prelude::*;
@@ -165,14 +164,6 @@ fn summarize(positions: &[Position], metrics: &[Option<PositionMetrics>]) -> Por
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 
-/// Which entry form is open above the position list. One at a time: the two
-/// forms overlap in purpose and stacking them would be confusing.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EntryPanel {
-    Trade,
-    Position,
-}
-
 #[component]
 pub fn PortfolioPage() -> impl IntoView {
     let auth = use_context::<AuthState>().expect("AuthState missing");
@@ -180,10 +171,8 @@ pub fn PortfolioPage() -> impl IntoView {
     let positions = RwSignal::new(Vec::<Position>::new());
     let loading = RwSignal::new(true);
     let error = RwSignal::new(Option::<String>::None);
-    let panel = RwSignal::new(Option::<EntryPanel>::None);
-    let toggle_panel = move |which: EntryPanel| {
-        panel.update(|p| *p = if *p == Some(which) { None } else { Some(which) });
-    };
+    // Whether the "Add trades" panel is open above the position list.
+    let show_trades = RwSignal::new(false);
     let market_data = RwSignal::new(HashMap::<String, MarketData>::new());
     let quote_loading = RwSignal::new(false);
     // Symbols whose live quote fetch failed — surfaced in the UI so the user
@@ -470,7 +459,7 @@ pub fn PortfolioPage() -> impl IntoView {
         }
     };
 
-    // A position was added or changed by one of the entry forms. Merge it in
+    // A position was added or changed by the trade panel. Merge it in
     // and pull a live quote for its symbol so the mark fills in without a page
     // refresh — served from cache when we have it.
     let on_position_saved = move |p: Position| {
@@ -516,45 +505,28 @@ pub fn PortfolioPage() -> impl IntoView {
                         title="Bring in holdings with their real purchase dates"
                     >"Import"</a>
                     <button
-                        class="px-4 py-2 rounded text-sm font-medium border border-border text-gray-300 hover:border-gray-500 transition-colors"
-                        title="Enter a holding as one total, or start an empty trade log"
-                        on:click=move |_| toggle_panel(EntryPanel::Position)
-                    >
-                        {move || if panel.get() == Some(EntryPanel::Position) { "Cancel" } else { "+ Add position" }}
-                    </button>
-                    <button
                         class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-medium transition-colors"
-                        title="Record a buy or sell — new or against something you already hold"
-                        on:click=move |_| toggle_panel(EntryPanel::Trade)
+                        title="Record buys and sells — new holdings or against something you already hold"
+                        on:click=move |_| show_trades.update(|v| *v = !*v)
                     >
-                        {move || if panel.get() == Some(EntryPanel::Trade) { "Close" } else { "+ Add trades" }}
+                        {move || if show_trades.get() { "Close" } else { "+ Add trades" }}
                     </button>
                 </div>
             </div>
 
-            {move || match panel.get() {
-                // The trade panel stays open — several trades in a row is the
-                // normal case. The position form is one-and-done.
-                Some(EntryPanel::Trade) => view! {
-                    <AddTradeForm
-                        auth=auth
-                        positions=positions
-                        on_saved=on_position_saved
-                        on_removed=move |id: Uuid| {
-                            positions.update(|ps| ps.retain(|p| p.id != id));
-                            resync_tax();
-                        }
-                        on_close=move |_| panel.set(None)
-                    />
-                }.into_any(),
-                Some(EntryPanel::Position) => view! {
-                    <AddPositionForm auth=auth on_added=move |p: Position| {
-                        on_position_saved(p);
-                        panel.set(None);
-                    } />
-                }.into_any(),
-                None => ().into_any(),
-            }}
+            // Stays open once opened — several trades in a row is the normal case.
+            {move || show_trades.get().then(|| view! {
+                <AddTradeForm
+                    auth=auth
+                    positions=positions
+                    on_saved=on_position_saved
+                    on_removed=move |id: Uuid| {
+                        positions.update(|ps| ps.retain(|p| p.id != id));
+                        resync_tax();
+                    }
+                    on_close=move |_| show_trades.set(false)
+                />
+            })}
 
             {move || error.get().map(|e| view! { <p class="text-red-400 text-sm">{e}</p> })}
             {move || loading.get().then(|| view! { <p class="text-gray-400 text-sm">"Loading…"</p> })}
@@ -566,13 +538,13 @@ pub fn PortfolioPage() -> impl IntoView {
             })}
 
             // ── Position rows ───────────────────────────────────────────────
-            {move || (!loading.get() && positions.get().is_empty() && panel.get().is_none()).then(|| view! {
+            {move || (!loading.get() && positions.get().is_empty() && !show_trades.get()).then(|| view! {
                 <EmptyState
                     title="Start with what you own"
-                    body="Add a stock you hold and Martingale pulls the live price, works out your gain, \
-                          and shows what selling it today would cost you in federal tax. Importing is \
-                          worth the extra minute — it records when you bought each parcel of shares, \
-                          which is what decides whether a gain is taxed at the lower long-term rate."
+                    body="Enter the trades behind what you hold and Martingale pulls the live price, works \
+                          out your gain, and shows what selling today would cost you in federal tax. Each \
+                          trade carries its date, which is what decides whether a gain is taxed at the \
+                          lower long-term rate. Importing from your broker is quickest if you have many."
                 >
                     <a
                         href=format!("{}/import", crate::config::APP_BASE)
@@ -582,7 +554,7 @@ pub fn PortfolioPage() -> impl IntoView {
                     </a>
                     <button
                         class="px-4 py-2 rounded text-sm font-medium border border-border text-gray-300 hover:border-gray-500 transition-colors"
-                        on:click=move |_| panel.set(Some(EntryPanel::Trade))
+                        on:click=move |_| show_trades.set(true)
                     >
                         "Add trades by hand"
                     </button>
@@ -1455,11 +1427,10 @@ fn TradeLogPanel(
     }
 }
 
-// ── Shared entry-form pieces ──────────────────────────────────────────────────
+// ── Trade-form pieces ─────────────────────────────────────────────────────────
 
 /// Option-chain expiries and strikes for whatever symbol is typed, refetched as
 /// it changes and only while `wanted` is true (i.e. the form is in Option mode).
-/// Shared by the add-position and add-trade forms.
 fn use_option_meta(
     auth: AuthState,
     symbol: RwSignal<String>,
@@ -1560,22 +1531,17 @@ fn KindToggle(kind: RwSignal<PositionKind>) -> impl IntoView {
     }
 }
 
-/// Call/Put toggle plus expiry and strike pickers fed from the live chain.
-/// By default renders as three cells of an enclosing two-column grid; with
-/// `inline` it becomes three fixed-width cells for a single-row form.
+/// Call/Put toggle plus expiry and strike pickers fed from the live chain,
+/// as three fixed-width cells for the single-row trade form.
 #[component]
 fn OptionContractFields(
     opt_type: RwSignal<OptionType>,
     expiry: RwSignal<String>,
     strike: RwSignal<String>,
     option_meta: RwSignal<Vec<OptionMetaEntry>>,
-    #[prop(default = false)] inline: bool,
 ) -> impl IntoView {
-    let toggle_wrap = if inline { "flex gap-2 shrink-0" } else { "col-span-2 flex gap-2" };
-    let expiry_cls = if inline { "w-32 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500" }
-                     else { "w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500" };
-    let strike_cls = if inline { "w-24 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500" }
-                     else { expiry_cls };
+    const EXPIRY_CLS: &str = "w-32 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500";
+    const STRIKE_CLS: &str = "w-24 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500";
     move || {
         let meta = option_meta.get();
         let expiries = crate::models::market::live_expiries(
@@ -1588,7 +1554,7 @@ fn OptionContractFields(
 
         view! {
             <>
-                <div class=toggle_wrap>
+                <div class="flex gap-2 shrink-0">
                     {[OptionType::Call, OptionType::Put].map(|t| view! {
                         <button type="button"
                             class=move || format!(
@@ -1603,7 +1569,7 @@ fn OptionContractFields(
                 <div>
                     <label class="block text-xs text-gray-400 mb-1">"Expiry"</label>
                     <select
-                        class=expiry_cls
+                        class=EXPIRY_CLS
                         prop:value=move || expiry.get()
                         on:change=move |ev| {
                             expiry.set(event_target_value(&ev));
@@ -1619,7 +1585,7 @@ fn OptionContractFields(
                 <div>
                     <label class="block text-xs text-gray-400 mb-1">"Strike"</label>
                     <select
-                        class=strike_cls
+                        class=STRIKE_CLS
                         prop:value=move || strike.get()
                         on:change=move |ev| strike.set(event_target_value(&ev))
                     >
@@ -2039,7 +2005,6 @@ fn AddTradeForm(
                         expiry=expiry
                         strike=strike
                         option_meta=option_meta
-                        inline=true
                     />
                 })}
 
@@ -2124,185 +2089,5 @@ fn AddTradeForm(
                 })
             }}
         </form>
-    }
-}
-
-// ── Add position form ─────────────────────────────────────────────────────────
-
-#[component]
-fn AddPositionForm(
-    auth: AuthState,
-    on_added: impl Fn(Position) + 'static,
-) -> impl IntoView {
-    let on_added = Rc::new(on_added);
-    let symbol     = RwSignal::new(String::new());
-    let kind       = RwSignal::new(PositionKind::Stock);
-    let entry_mode = RwSignal::new(PositionEntryMode::Snapshot);
-    let quantity   = RwSignal::new("1".to_string());
-    let cost_basis = RwSignal::new(String::new());
-    let opt_type    = RwSignal::new(OptionType::Call);
-    let strike      = RwSignal::new(String::new());
-    let expiry      = RwSignal::new(String::new());
-    let err         = RwSignal::new(Option::<String>::None);
-    let saving      = RwSignal::new(false);
-
-    let option_meta = use_option_meta(
-        auth,
-        symbol,
-        Signal::derive(move || kind.get() == PositionKind::Option),
-    );
-
-    let on_submit = move |ev: web_sys::SubmitEvent| {
-        ev.prevent_default();
-        err.set(None);
-
-        let sym = symbol.get().trim().to_uppercase();
-        if sym.is_empty() { err.set(Some("Symbol required.".into())); return; }
-
-        let mode = entry_mode.get();
-
-        let (qty, cb) = if mode == PositionEntryMode::TradeLog {
-            (0i32, 0.0f64)
-        } else {
-            let q: i32 = match quantity.get().trim().parse() {
-                Ok(v) => v,
-                Err(_) => { err.set(Some("Invalid quantity.".into())); return; }
-            };
-            let c: f64 = match cost_basis.get().trim().parse() {
-                Ok(v) => v,
-                Err(_) => { err.set(Some("Invalid cost basis.".into())); return; }
-            };
-            (q, c)
-        };
-
-        let mut position = match kind.get() {
-            PositionKind::Stock => Position::new_stock(&sym, qty, cb),
-            PositionKind::Option => {
-                match parse_option_spec(&sym, opt_type.get(), &strike.get(), &expiry.get()) {
-                    Ok(spec) => Position::new_option(&sym, qty, cb, spec),
-                    Err(e) => { err.set(Some(e)); return; }
-                }
-            }
-        };
-        position.entry_mode = mode;
-
-        // Fire-and-forget: warm the quote + option-chain caches for a freshly
-        // added stock so its mark and a future option entry have data ready.
-        // Both fill in asynchronously — the Add itself doesn't block on them.
-        if kind.get() == PositionKind::Stock {
-            let warm_tok = auth.token.get().unwrap_or_default();
-            let warm_sym = sym.clone();
-            spawn_local(async move {
-                let _ = market::fetch_latest_bar(&warm_tok, &warm_sym).await;
-                let mut page_token: Option<String> = None;
-                loop {
-                    match market::fetch_option_chain_live(&warm_tok, &warm_sym, page_token.as_deref()).await {
-                        Ok(page) => match page.next_page_token {
-                            Some(t) => page_token = Some(t),
-                            None => break,
-                        },
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-
-        saving.set(true);
-        let token = auth.token.get().unwrap_or_default();
-        let user_id = auth.user_id.get().unwrap_or_default();
-        let pos = position.clone();
-        let cb_fn = Rc::clone(&on_added);
-        spawn_local(async move {
-            match supabase::upsert_position(&token, &user_id, &pos).await {
-                Ok(_) => cb_fn(pos),
-                Err(e) => { err.set(Some(e)); saving.set(false); }
-            }
-        });
-    };
-
-    view! {
-        <form on:submit=on_submit class="bg-panel border border-border rounded-xl p-6 space-y-4">
-            <h2 class="text-sm font-medium text-gray-300">"Add position"</h2>
-
-            <KindToggle kind=kind />
-
-            // Entry mode toggle
-            <div class="space-y-1.5">
-                <div class="flex items-center gap-2 text-xs">
-                    <span class="text-gray-500 font-sans">"How do you want to enter it?"</span>
-                    <div class="flex rounded overflow-hidden border border-border">
-                        <button type="button"
-                            class=move || if entry_mode.get() == PositionEntryMode::Snapshot {
-                                "px-2 py-0.5 bg-blue-600 text-white"
-                            } else {
-                                "px-2 py-0.5 text-gray-400 hover:text-gray-200"
-                            }
-                            on:click=move |_| entry_mode.set(PositionEntryMode::Snapshot)
-                        >"One total"</button>
-                        <button type="button"
-                            class=move || if entry_mode.get() == PositionEntryMode::TradeLog {
-                                "px-2 py-0.5 bg-blue-600 text-white"
-                            } else {
-                                "px-2 py-0.5 text-gray-400 hover:text-gray-200"
-                            }
-                            on:click=move |_| entry_mode.set(PositionEntryMode::TradeLog)
-                        >"Purchase by purchase"</button>
-                    </div>
-                </div>
-                <Hint>
-                    {move || if entry_mode.get() == PositionEntryMode::TradeLog {
-                        "You'll add each buy and sell after creating this, with its own date and price. \
-                         Slower, but it tracks holding periods properly — which is what decides whether \
-                         a gain is taxed at the long-term rate."
-                    } else {
-                        "Enter one quantity and one average price. Quick, but Martingale can't tell \
-                         which shares are long-term, so tax estimates are rougher."
-                    }}
-                </Hint>
-            </div>
-
-            <div class="grid grid-cols-2 gap-3">
-                <MiniInput label="Symbol" signal=symbol ph="AAPL" />
-                {move || (entry_mode.get() == PositionEntryMode::Snapshot).then(|| view! {
-                    <>
-                        <MiniInput label="Quantity (neg=short)" signal=quantity  ph="1" />
-                        <MiniInput label="Cost basis / share"  signal=cost_basis ph="0.00" />
-                    </>
-                })}
-
-                {move || (kind.get() == PositionKind::Option).then(|| view! {
-                    <OptionContractFields
-                        opt_type=opt_type
-                        expiry=expiry
-                        strike=strike
-                        option_meta=option_meta
-                    />
-                })}
-            </div>
-
-            {move || err.get().map(|e| view! { <p class="text-red-400 text-xs">{e}</p> })}
-
-            <button type="submit"
-                class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm font-medium"
-                prop:disabled=move || saving.get()
-            >
-                {move || if saving.get() { "Saving…" } else { "Add" }}
-            </button>
-        </form>
-    }
-}
-
-#[component]
-fn MiniInput(label: &'static str, signal: RwSignal<String>, ph: &'static str) -> impl IntoView {
-    view! {
-        <div>
-            <label class="block text-xs text-gray-400 mb-1">{label}</label>
-            <input
-                class="w-full bg-surface border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
-                prop:value=move || signal.get()
-                on:input=move |ev| signal.set(event_target_value(&ev))
-                placeholder=ph
-            />
-        </div>
     }
 }
