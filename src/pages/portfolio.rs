@@ -7,7 +7,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
 use crate::app::AuthState;
-use crate::components::pickers::{ExpiryInput, StrikeInput};
+use crate::components::pickers::{ExpiryPicker, StrikePicker};
 use crate::components::ui::{Callout, Disclosure, EmptyState, Hint, Info, Stat, Tone};
 use crate::format::{fmt_cash, Num};
 use crate::models::market::{LatestBar, OptionMetaEntry};
@@ -1569,7 +1569,7 @@ fn OptionContractFields(
             </div>
             <div>
                 <label class="block text-xs text-gray-400 mb-1">"Expiry"</label>
-                <ExpiryInput
+                <ExpiryPicker
                     value=expiry
                     options=expiries
                     on_set=Callback::new(move |_| strike.set(String::new()))
@@ -1578,7 +1578,7 @@ fn OptionContractFields(
             </div>
             <div>
                 <label class="block text-xs text-gray-400 mb-1">"Strike"</label>
-                <StrikeInput value=strike options=strikes class=STRIKE_CLS />
+                <StrikePicker value=strike options=strikes class=STRIKE_CLS />
             </div>
         </>
     }

@@ -6,7 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::api::{market, supabase};
 use crate::app::AuthState;
 use crate::charts::{self, LinePlot, Series};
-use crate::components::pickers::{ExpiryInput, StrikeInput};
+use crate::components::pickers::{ExpiryPicker, StrikePicker};
 use crate::components::ui::{Callout, Disclosure, Hint, Info, Label, Tone};
 use crate::models::combo::{Combo, ComboLegSpec};
 use crate::models::market::OptionMetaEntry;
@@ -879,8 +879,8 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                         <div class="space-y-2">
                             <Hint>
                                 "One row per contract. Use a negative quantity for a contract you're \
-                                 selling — a roll is one negative row and one positive row. Expiry and \
-                                 strike offer what the market lists, but you can type any date or price."
+                                 selling — a roll is one negative row and one positive row. Pick \
+                                 \"Custom…\" under expiry or strike for a contract the market list lacks."
                             </Hint>
                             <div class="grid grid-cols-[auto_1fr_1fr_auto_auto] gap-2 text-xs text-gray-500 font-sans">
                                 <span>"Type"</span>
@@ -901,13 +901,13 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                                     </div>
                                     // Typed or picked: the chain's list is a suggestion, not a
                                     // constraint, so a contract it doesn't carry can still be priced.
-                                    <ExpiryInput
+                                    <ExpiryPicker
                                         value=leg.expiry
                                         options=Signal::derive(move || expiries.get())
                                         on_set=Callback::new(move |_| leg.strike.set(String::new()))
                                         class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
                                     />
-                                    <StrikeInput
+                                    <StrikePicker
                                         value=leg.strike
                                         options=Signal::derive(move || {
                                             let ts = if leg.option_type.get() == OptionType::Call { "call" } else { "put" };

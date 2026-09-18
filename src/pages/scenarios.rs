@@ -8,7 +8,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
 use crate::app::AuthState;
-use crate::components::pickers::{ExpiryInput, StrikeInput};
+use crate::components::pickers::{ExpiryPicker, StrikePicker};
 use crate::components::ui::{Disclosure, EmptyState, Hint, Info, Label};
 use crate::models::market::{OptionChainEntry, OptionMetaEntry};
 use crate::store::MarketStore;
@@ -1130,13 +1130,13 @@ fn TradeEntryRow(
                             // Typed or picked: a contract the chain doesn't list can
                             // still be modelled.
                             view! {
-                                <ExpiryInput
+                                <ExpiryPicker
                                     value=entry.expiry
                                     options=Signal::derive(move || expiries.get())
                                     on_set=Callback::new(move |_| entry.strike.set(String::new()))
                                     class=format!("{MICRO_CLS} w-32")
                                 />
-                                <StrikeInput
+                                <StrikePicker
                                     value=entry.strike
                                     options=Signal::derive(move || strikes.get())
                                     class=format!("{MICRO_CLS} w-24")
