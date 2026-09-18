@@ -44,6 +44,27 @@ pub fn live_strikes(meta: &[OptionMetaEntry], expiry: &str, option_type: &str) -
     v
 }
 
+/// Strikes to offer for a typed-in expiry the chain doesn't list: every strike
+/// the chain knows for that option type, across all its expiries. A far-dated
+/// or newly listed contract usually sits at a strike the nearer ones share.
+pub fn known_strikes(meta: &[OptionMetaEntry], option_type: &str) -> Vec<f64> {
+    let mut v: Vec<f64> = meta
+        .iter()
+        .filter(|e| e.option_type == option_type)
+        .map(|e| e.strike)
+        .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    v
+}
+
+/// `live_strikes` for `expiry`, falling back to `known_strikes` when the chain
+/// has nothing for that expiry — which is exactly when the user typed one.
+pub fn strikes_to_offer(meta: &[OptionMetaEntry], expiry: &str, option_type: &str) -> Vec<f64> {
+    let exact = live_strikes(meta, expiry, option_type);
+    if exact.is_empty() { known_strikes(meta, option_type) } else { exact }
+}
+
 pub fn live_expiries(meta: &[OptionMetaEntry], today: chrono::NaiveDate) -> Vec<String> {
     let mut v: Vec<String> = meta
         .iter()
@@ -121,4 +142,28 @@ pub struct OptionChainPage {
     pub next_page_token: Option<String>,
     #[serde(default)]
     pub cached: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn e(expiry: &str, t: &str, strike: f64) -> OptionMetaEntry {
+        OptionMetaEntry { expiry: expiry.into(), option_type: t.into(), strike }
+    }
+
+    #[test]
+    fn strikes_to_offer_falls_back_to_every_known_strike_for_a_typed_expiry() {
+        let meta = vec![
+            e("2026-10-16", "call", 100.0),
+            e("2026-10-16", "call", 110.0),
+            e("2026-11-20", "call", 110.0),
+            e("2026-11-20", "call", 120.0),
+            e("2026-11-20", "put", 90.0),
+        ];
+        assert_eq!(strikes_to_offer(&meta, "2026-10-16", "call"), vec![100.0, 110.0]);
+        // Not listed: offer the union, deduplicated and sorted, for that type only.
+        assert_eq!(strikes_to_offer(&meta, "2028-01-21", "call"), vec![100.0, 110.0, 120.0]);
+        assert_eq!(strikes_to_offer(&meta, "2028-01-21", "put"), vec![90.0]);
+    }
 }

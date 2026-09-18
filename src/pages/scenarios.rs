@@ -8,6 +8,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
 use crate::app::AuthState;
+use crate::components::pickers::{ExpiryInput, StrikeInput};
 use crate::components::ui::{Disclosure, EmptyState, Hint, Info, Label};
 use crate::models::market::{OptionChainEntry, OptionMetaEntry};
 use crate::store::MarketStore;
@@ -1001,7 +1002,7 @@ fn TradeEntryRow(
 
     let strikes = Memo::new(move |_| {
         let type_str = if entry.opt_type.get() == OptionType::Call { "call" } else { "put" };
-        crate::models::market::live_strikes(&option_meta.get(), &entry.expiry.get(), type_str)
+        crate::models::market::strikes_to_offer(&option_meta.get(), &entry.expiry.get(), type_str)
     });
 
     let on_closes_change = {
@@ -1126,48 +1127,20 @@ fn TradeEntryRow(
                                 </span>
                             }.into_any()
                         } else {
+                            // Typed or picked: a contract the chain doesn't list can
+                            // still be modelled.
                             view! {
-                                <select
-                                    class=MICRO_CLS
-                                    style="min-width:9rem"
-                                    prop:value=move || { let _ = expiries.get(); entry.expiry.get() }
-                                    on:change=move |ev| {
-                                        entry.expiry.set(event_target_value(&ev));
-                                        entry.strike.set(String::new());
-                                    }
-                                >
-                                    <option value="">"— expiry —"</option>
-                                    {move || {
-                                        let list = expiries.get();
-                                        let current = entry.expiry.get_untracked();
-                                        let show_saved = !current.is_empty() && !list.contains(&current);
-                                        list.into_iter()
-                                            .chain(show_saved.then(|| current).into_iter())
-                                            .map(|exp| view! { <option value=exp.clone()>{exp.clone()}</option> })
-                                            .collect_view()
-                                    }}
-                                </select>
-                                <select
-                                    class=MICRO_CLS
-                                    style="min-width:6rem"
-                                    prop:value=move || { let _ = strikes.get(); entry.strike.get() }
-                                    on:change=move |ev| entry.strike.set(event_target_value(&ev))
-                                >
-                                    <option value="">"— strike —"</option>
-                                    {move || {
-                                        let list = strikes.get();
-                                        let current = entry.strike.get_untracked();
-                                        let current_f: Option<f64> = current.trim().parse().ok();
-                                        let show_saved = current_f.is_some() && !list.contains(current_f.as_ref().unwrap());
-                                        list.into_iter()
-                                            .chain(show_saved.then(|| current_f.unwrap()).into_iter())
-                                            .map(|s| {
-                                                let val = format!("{}", s);
-                                                view! { <option value=val.clone()>{format!("${:.0}", s)}</option> }
-                                            })
-                                            .collect_view()
-                                    }}
-                                </select>
+                                <ExpiryInput
+                                    value=entry.expiry
+                                    options=Signal::derive(move || expiries.get())
+                                    on_set=Callback::new(move |_| entry.strike.set(String::new()))
+                                    class=format!("{MICRO_CLS} w-32")
+                                />
+                                <StrikeInput
+                                    value=entry.strike
+                                    options=Signal::derive(move || strikes.get())
+                                    class=format!("{MICRO_CLS} w-24")
+                                />
                             }.into_any()
                         }
                     }}

@@ -6,6 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::api::{market, supabase};
 use crate::app::AuthState;
 use crate::charts::{self, LinePlot, Series};
+use crate::components::pickers::{ExpiryInput, StrikeInput};
 use crate::components::ui::{Callout, Disclosure, Hint, Info, Label, Tone};
 use crate::models::combo::{Combo, ComboLegSpec};
 use crate::models::market::OptionMetaEntry;
@@ -878,7 +879,8 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                         <div class="space-y-2">
                             <Hint>
                                 "One row per contract. Use a negative quantity for a contract you're \
-                                 selling — a roll is one negative row and one positive row."
+                                 selling — a roll is one negative row and one positive row. Expiry and \
+                                 strike offer what the market lists, but you can type any date or price."
                             </Hint>
                             <div class="grid grid-cols-[auto_1fr_1fr_auto_auto] gap-2 text-xs text-gray-500 font-sans">
                                 <span>"Type"</span>
@@ -897,40 +899,22 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                                             >{t.label()}</button>
                                         })}
                                     </div>
-                                    <select class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
-                                        prop:value=move || leg.expiry.get()
-                                        on:change=move |ev| { leg.expiry.set(event_target_value(&ev)); leg.strike.set(String::new()); }
-                                    >
-                                        <option value="">"— expiry —"</option>
-                                        // A saved combo can name an expiry that has since passed and
-                                        // is no longer offered. Keep it in the list so the leg still
-                                        // shows what it is, rather than blanking itself out.
-                                        {move || {
-                                            let list = expiries.get();
-                                            let current = leg.expiry.get_untracked();
-                                            let keep = !current.is_empty() && !list.contains(&current);
-                                            list.into_iter()
-                                                .chain(keep.then_some(current))
-                                                .map(|e| view! { <option value=e.clone()>{e.clone()}</option> })
-                                                .collect_view()
-                                        }}
-                                    </select>
-                                    <select class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
-                                        prop:value=move || leg.strike.get()
-                                        on:change=move |ev| leg.strike.set(event_target_value(&ev))
-                                    >
-                                        <option value="">"— strike —"</option>
-                                        {move || {
+                                    // Typed or picked: the chain's list is a suggestion, not a
+                                    // constraint, so a contract it doesn't carry can still be priced.
+                                    <ExpiryInput
+                                        value=leg.expiry
+                                        options=Signal::derive(move || expiries.get())
+                                        on_set=Callback::new(move |_| leg.strike.set(String::new()))
+                                        class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                                    />
+                                    <StrikeInput
+                                        value=leg.strike
+                                        options=Signal::derive(move || {
                                             let ts = if leg.option_type.get() == OptionType::Call { "call" } else { "put" };
-                                            let ks = crate::models::market::live_strikes(
-                                                &combo.meta.get(), &leg.expiry.get(), ts,
-                                            );
-                                            ks.into_iter().map(|s| {
-                                                let val = format!("{}", s);
-                                                view! { <option value=val.clone()>{format!("${:.0}", s)}</option> }
-                                            }).collect_view()
-                                        }}
-                                    </select>
+                                            crate::models::market::strikes_to_offer(&combo.meta.get(), &leg.expiry.get(), ts)
+                                        })
+                                        class="bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                                    />
                                     <input class="w-16 bg-surface border border-border rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
                                         prop:value=move || leg.quantity.get()
                                         on:input=move |ev| leg.quantity.set(event_target_value(&ev))

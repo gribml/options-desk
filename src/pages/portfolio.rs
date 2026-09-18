@@ -7,6 +7,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::{market, supabase};
 use crate::app::AuthState;
+use crate::components::pickers::{ExpiryInput, StrikeInput};
 use crate::components::ui::{Callout, Disclosure, EmptyState, Hint, Info, Stat, Tone};
 use crate::format::{fmt_cash, Num};
 use crate::models::market::{LatestBar, OptionMetaEntry};
@@ -1531,8 +1532,10 @@ fn KindToggle(kind: RwSignal<PositionKind>) -> impl IntoView {
     }
 }
 
-/// Call/Put toggle plus expiry and strike pickers fed from the live chain,
-/// as three fixed-width cells for the single-row trade form.
+/// Call/Put toggle plus expiry and strike pickers, as three fixed-width cells
+/// for the single-row trade form. The pickers offer what the chain lists but
+/// take anything typed — a LEAP or a fresh listing the snapshot lacks is still
+/// a real contract you may hold.
 #[component]
 fn OptionContractFields(
     opt_type: RwSignal<OptionType>,
@@ -1542,62 +1545,42 @@ fn OptionContractFields(
 ) -> impl IntoView {
     const EXPIRY_CLS: &str = "w-32 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500";
     const STRIKE_CLS: &str = "w-24 bg-surface border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500";
-    move || {
-        let meta = option_meta.get();
-        let expiries = crate::models::market::live_expiries(
-            &meta,
-            chrono::Local::now().date_naive(),
-        );
+    let expiries = Signal::derive(move || {
+        crate::models::market::live_expiries(&option_meta.get(), chrono::Local::now().date_naive())
+    });
+    let strikes = Signal::derive(move || {
         let type_str = if opt_type.get() == OptionType::Call { "call" } else { "put" };
-        let sel_exp = expiry.get();
-        let strikes = crate::models::market::live_strikes(&meta, &sel_exp, type_str);
+        crate::models::market::strikes_to_offer(&option_meta.get(), &expiry.get(), type_str)
+    });
 
-        view! {
-            <>
-                <div class="flex gap-2 shrink-0">
-                    {[OptionType::Call, OptionType::Put].map(|t| view! {
-                        <button type="button"
-                            class=move || format!(
-                                "px-4 py-1 rounded text-xs border transition-colors {}",
-                                if opt_type.get() == t { "bg-blue-600 border-blue-600 text-white" }
-                                else { "bg-surface border-border text-gray-400" }
-                            )
-                            on:click=move |_| opt_type.set(t)
-                        >{t.label()}</button>
-                    })}
-                </div>
-                <div>
-                    <label class="block text-xs text-gray-400 mb-1">"Expiry"</label>
-                    <select
-                        class=EXPIRY_CLS
-                        prop:value=move || expiry.get()
-                        on:change=move |ev| {
-                            expiry.set(event_target_value(&ev));
-                            strike.set(String::new());
-                        }
-                    >
-                        <option value="">"— select expiry —"</option>
-                        {expiries.into_iter().map(|exp| {
-                            view! { <option value=exp.clone()>{exp.clone()}</option> }
-                        }).collect_view()}
-                    </select>
-                </div>
-                <div>
-                    <label class="block text-xs text-gray-400 mb-1">"Strike"</label>
-                    <select
-                        class=STRIKE_CLS
-                        prop:value=move || strike.get()
-                        on:change=move |ev| strike.set(event_target_value(&ev))
-                    >
-                        <option value="">"— select strike —"</option>
-                        {strikes.into_iter().map(|s| {
-                            let val = format!("{}", s);
-                            view! { <option value=val.clone()>{format!("${:.0}", s)}</option> }
-                        }).collect_view()}
-                    </select>
-                </div>
-            </>
-        }
+    view! {
+        <>
+            <div class="flex gap-2 shrink-0">
+                {[OptionType::Call, OptionType::Put].map(|t| view! {
+                    <button type="button"
+                        class=move || format!(
+                            "px-4 py-1 rounded text-xs border transition-colors {}",
+                            if opt_type.get() == t { "bg-blue-600 border-blue-600 text-white" }
+                            else { "bg-surface border-border text-gray-400" }
+                        )
+                        on:click=move |_| opt_type.set(t)
+                    >{t.label()}</button>
+                })}
+            </div>
+            <div>
+                <label class="block text-xs text-gray-400 mb-1">"Expiry"</label>
+                <ExpiryInput
+                    value=expiry
+                    options=expiries
+                    on_set=Callback::new(move |_| strike.set(String::new()))
+                    class=EXPIRY_CLS
+                />
+            </div>
+            <div>
+                <label class="block text-xs text-gray-400 mb-1">"Strike"</label>
+                <StrikeInput value=strike options=strikes class=STRIKE_CLS />
+            </div>
+        </>
     }
 }
 
