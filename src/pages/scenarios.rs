@@ -1455,11 +1455,11 @@ fn ScenarioCard(
                         <div>
                             <p class="text-gray-500 mb-1 font-sans">"Taxable gains this creates"</p>
                             <p class="inline-flex items-center gap-1 text-yellow-300 font-sans">
-                                "Taxed as income " <Info term="short-term-gain" />
+                                "Short term tax " <Info term="short-term-gain" />
                                 <span class="font-mono">{fmt_cash(total_st)}</span>
                             </p>
                             <p class="inline-flex items-center gap-1 text-blue-300 font-sans">
-                                "Taxed at the lower rate " <Info term="long-term-gain" />
+                                "Long Term tax " <Info term="long-term-gain" />
                                 <span class="font-mono">{fmt_cash(total_lt)}</span>
                             </p>
                             <div class="mt-2 space-y-0.5">
