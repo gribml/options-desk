@@ -540,6 +540,10 @@ pub fn PortfolioPage() -> impl IntoView {
                         auth=auth
                         positions=positions
                         on_saved=on_position_saved
+                        on_removed=move |id: Uuid| {
+                            positions.update(|ps| ps.retain(|p| p.id != id));
+                            resync_tax();
+                        }
                         on_close=move |_| panel.set(None)
                     />
                 }.into_any(),
@@ -1633,6 +1637,38 @@ fn OptionContractFields(
 
 // ── Add trade form ────────────────────────────────────────────────────────────
 
+/// A trade recorded by the panel in this sitting — what was entered, and
+/// where it went, so it can be shown, edited, or taken back.
+#[derive(Clone, Debug)]
+struct AddedTrade {
+    trade_id: Uuid,
+    position_id: Uuid,
+    symbol: String,
+    kind: PositionKind,
+    spec: Option<OptionSpec>,
+    is_buy: bool,
+    quantity: i32,
+    price: f64,
+    date: NaiveDate,
+}
+
+impl AddedTrade {
+    fn summary(&self) -> String {
+        format!(
+            "{} {} {}{} @ ${:.2} on {}",
+            if self.is_buy { "Bought" } else { "Sold" },
+            self.quantity,
+            self.symbol,
+            match &self.spec {
+                Some(s) => format!(" {} ${:.0} {}", s.option_type.label(), s.strike, s.expiry.format("%d-%b-%y")),
+                None => String::new(),
+            },
+            self.price,
+            self.date.format("%-d %b %Y"),
+        )
+    }
+}
+
 /// Record buys and sells, one per row, as many as you like. Each trade goes
 /// to the position that already holds that instrument if there is one,
 /// otherwise a new trade-log position is opened for it — so this is also the
@@ -1643,6 +1679,7 @@ fn AddTradeForm(
     auth: AuthState,
     positions: RwSignal<Vec<Position>>,
     #[prop(into)] on_saved: Callback<Position>,
+    #[prop(into)] on_removed: Callback<Uuid>,
     #[prop(into)] on_close: Callback<()>,
 ) -> impl IntoView {
     let symbol   = RwSignal::new(String::new());
@@ -1656,8 +1693,16 @@ fn AddTradeForm(
     let expiry   = RwSignal::new(String::new());
     let err      = RwSignal::new(Option::<String>::None);
     let saving   = RwSignal::new(false);
-    // What this panel has recorded since it opened, newest first.
-    let added    = RwSignal::new(Vec::<String>::new());
+    // What this panel has recorded since it opened, newest first. Each entry
+    // remembers enough to be taken back or reloaded into the row for editing.
+    let added    = RwSignal::new(Vec::<AddedTrade>::new());
+    // Each position this sitting has touched, as it was before the first
+    // touch: `None` if the sitting created it. Undoing the last trade of a
+    // position restores this — including turning a converted "one total"
+    // back into one — rather than leaving an empty or half-converted row.
+    let origins  = RwSignal::new(HashMap::<Uuid, Option<Position>>::new());
+    // Trade id being edited: submitting replaces it instead of adding.
+    let editing  = RwSignal::new(Option::<Uuid>::None);
 
     let option_meta = use_option_meta(
         auth,
@@ -1733,6 +1778,90 @@ fn AddTradeForm(
         Some(note)
     };
 
+    // Take one recorded trade back out of its position and persist that.
+    // If it was the sitting's last trade on that position, the position goes
+    // back to how it was before the sitting touched it (or away entirely if
+    // the sitting created it). Sequenced, not fire-and-forget, so callers can
+    // chain it — undo-all and edit both do.
+    let remove_added = move |entry: AddedTrade| async move {
+        let (Some(tok), Some(uid)) = (auth.token.get_untracked(), auth.user_id.get_untracked()) else {
+            return Err("Not signed in.".to_string());
+        };
+        let Some(mut pos) = positions.get_untracked().into_iter().find(|p| p.id == entry.position_id) else {
+            // Already gone (deleted from its row); nothing to unwind.
+            added.update(|v| v.retain(|a| a.trade_id != entry.trade_id));
+            return Ok(());
+        };
+        pos.trades.retain(|t| t.id != entry.trade_id);
+        let others_from_sitting = added.get_untracked().iter()
+            .any(|a| a.position_id == entry.position_id && a.trade_id != entry.trade_id);
+        let origin = origins.get_untracked().get(&entry.position_id).cloned();
+        match (others_from_sitting, origin) {
+            (false, Some(None)) => {
+                supabase::delete_position(&tok, &entry.position_id.to_string()).await?;
+                on_removed.run(entry.position_id);
+                origins.update(|m| { m.remove(&entry.position_id); });
+            }
+            (false, Some(Some(orig))) => {
+                supabase::upsert_position(&tok, &uid, &orig).await?;
+                on_saved.run(orig);
+                origins.update(|m| { m.remove(&entry.position_id); });
+            }
+            _ => {
+                supabase::upsert_position(&tok, &uid, &pos).await?;
+                on_saved.run(pos);
+            }
+        }
+        added.update(|v| v.retain(|a| a.trade_id != entry.trade_id));
+        Ok(())
+    };
+
+    let on_remove_one = move |entry: AddedTrade| {
+        err.set(None);
+        saving.set(true);
+        spawn_local(async move {
+            if let Err(e) = remove_added(entry).await { err.set(Some(e)); }
+            saving.set(false);
+        });
+    };
+
+    let on_undo_all = move |_| {
+        err.set(None);
+        editing.set(None);
+        saving.set(true);
+        spawn_local(async move {
+            // Newest first, so a position's later trades come out before
+            // its earlier ones and every intermediate state is one we've seen.
+            for entry in added.get_untracked() {
+                if let Err(e) = remove_added(entry).await { err.set(Some(e)); break; }
+            }
+            saving.set(false);
+        });
+    };
+
+    // Load a recorded trade back into the row. Submitting then replaces it.
+    let on_edit = move |entry: AddedTrade| {
+        symbol.set(entry.symbol.clone());
+        kind.set(entry.kind.clone());
+        is_buy.set(entry.is_buy);
+        quantity.set(entry.quantity.to_string());
+        price.set(format!("{}", entry.price));
+        date.set(entry.date.format("%Y-%m-%d").to_string());
+        if let Some(sp) = &entry.spec {
+            opt_type.set(sp.option_type);
+            expiry.set(sp.expiry.format("%Y-%m-%d").to_string());
+            strike.set(format!("{}", sp.strike));
+        }
+        err.set(None);
+        editing.set(Some(entry.trade_id));
+    };
+
+    let cancel_edit = move |_| {
+        editing.set(None);
+        quantity.set(String::new());
+        price.set(String::new());
+    };
+
     let on_submit = move |ev: web_sys::SubmitEvent| {
         ev.prevent_default();
         err.set(None);
@@ -1761,19 +1890,27 @@ fn AddTradeForm(
         } else {
             None
         };
+        let buy = is_buy.get();
+        let replacing = editing.get_untracked()
+            .and_then(|id| added.get_untracked().into_iter().find(|a| a.trade_id == id));
 
-        let trade = Trade {
-            id: Uuid::new_v4(),
-            date: d,
-            quantity: if is_buy.get() { qty } else { -qty },
-            price: px,
-        };
+        saving.set(true);
+        spawn_local(async move {
+            // An edit is the old trade coming out and the new one going in.
+            // Unwinding first means the new one is matched against the
+            // position as it stands without the old — it may even land on a
+            // different position if the symbol or contract changed.
+            if let Some(old) = replacing {
+                if let Err(e) = remove_added(old).await {
+                    err.set(Some(e));
+                    saving.set(false);
+                    return;
+                }
+            }
 
-        let mut pos = positions
-            .get_untracked()
-            .into_iter()
-            .find(|p| p.same_instrument(&sym, &k, spec.as_ref()))
-            .unwrap_or_else(|| {
+            let existing = positions.get_untracked().into_iter()
+                .find(|p| p.same_instrument(&sym, &k, spec.as_ref()));
+            let mut pos = existing.clone().unwrap_or_else(|| {
                 let mut p = match spec.clone() {
                     Some(s) => Position::new_option(&sym, 0, 0.0, s),
                     None => Position::new_stock(&sym, 0, 0.0),
@@ -1781,29 +1918,35 @@ fn AddTradeForm(
                 p.entry_mode = PositionEntryMode::TradeLog;
                 p
             });
-        pos.record_trade(trade);
+            // First touch this sitting: remember how it was.
+            origins.update(|m| { m.entry(pos.id).or_insert(existing); });
 
-        let summary = format!(
-            "{} {} {}{} @ ${:.2} on {}",
-            if is_buy.get() { "Bought" } else { "Sold" },
-            qty,
-            sym,
-            match &spec {
-                Some(s) => format!(" {} ${:.0} {}", s.option_type.label(), s.strike, s.expiry.format("%d-%b-%y")),
-                None => String::new(),
-            },
-            px,
-            d.format("%-d %b %Y"),
-        );
+            let trade = Trade {
+                id: Uuid::new_v4(),
+                date: d,
+                quantity: if buy { qty } else { -qty },
+                price: px,
+            };
+            let entry = AddedTrade {
+                trade_id: trade.id,
+                position_id: pos.id,
+                symbol: sym.clone(),
+                kind: k.clone(),
+                spec: spec.clone(),
+                is_buy: buy,
+                quantity: qty,
+                price: px,
+                date: d,
+            };
+            pos.record_trade(trade);
 
-        saving.set(true);
-        let token = auth.token.get_untracked().unwrap_or_default();
-        let user_id = auth.user_id.get_untracked().unwrap_or_default();
-        spawn_local(async move {
+            let token = auth.token.get_untracked().unwrap_or_default();
+            let user_id = auth.user_id.get_untracked().unwrap_or_default();
             match supabase::upsert_position(&token, &user_id, &pos).await {
                 Ok(_) => {
                     on_saved.run(pos);
-                    added.update(|v| v.insert(0, summary));
+                    added.update(|v| v.insert(0, entry));
+                    editing.set(None);
                     // Symbol, side, date and contract are usually the same for
                     // the next one; the amounts never are.
                     quantity.set(String::new());
@@ -1901,11 +2044,25 @@ fn AddTradeForm(
                 })}
 
                 <button type="submit"
-                    class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-1.5 rounded text-sm font-medium shrink-0"
+                    class=move || format!(
+                        "disabled:opacity-50 px-4 py-1.5 rounded text-sm font-medium shrink-0 {}",
+                        if editing.get().is_some() { "bg-amber-600 hover:bg-amber-500" }
+                        else { "bg-blue-600 hover:bg-blue-500" }
+                    )
                     prop:disabled=move || saving.get()
                 >
-                    {move || if saving.get() { "Saving…" } else { "Add" }}
+                    {move || match (saving.get(), editing.get().is_some()) {
+                        (true, _) => "Saving…",
+                        (false, true) => "Save change",
+                        (false, false) => "Add",
+                    }}
                 </button>
+                {move || editing.get().is_some().then(|| view! {
+                    <button type="button"
+                        class="text-xs text-gray-500 hover:text-gray-300 transition-colors font-sans py-1.5"
+                        on:click=cancel_edit
+                    >"Cancel edit"</button>
+                })}
             </div>
 
             <Hint>
@@ -1920,16 +2077,48 @@ fn AddTradeForm(
             {move || target_note().map(|n| view! { <p class="text-xs text-gray-500 font-sans">{n}</p> })}
             {move || err.get().map(|e| view! { <p class="text-red-400 text-xs">{e}</p> })}
 
-            // Running list of what this sitting has recorded.
+            // Running list of what this sitting has recorded. Each line can be
+            // reloaded into the row or taken back; the whole lot can be undone.
             {move || {
                 let list = added.get();
                 (!list.is_empty()).then(|| view! {
                     <div class="border-t border-border pt-3 space-y-1">
-                        <p class="text-xs font-medium text-gray-300 font-sans">
-                            {format!("Added {} trade{}", list.len(), if list.len() == 1 { "" } else { "s" })}
-                        </p>
-                        {list.into_iter().map(|line| view! {
-                            <p class="text-xs text-gray-400 font-mono">"✓ " {line}</p>
+                        <div class="flex items-center justify-between">
+                            <p class="text-xs font-medium text-gray-300 font-sans">
+                                {format!("Added {} trade{}", list.len(), if list.len() == 1 { "" } else { "s" })}
+                            </p>
+                            <button type="button"
+                                class="text-xs text-gray-500 hover:text-red-400 disabled:opacity-40 transition-colors font-sans"
+                                prop:disabled=move || saving.get()
+                                title="Take back every trade added in this sitting"
+                                on:click=on_undo_all
+                            >"Undo all"</button>
+                        </div>
+                        {list.into_iter().map(|entry| {
+                            let tid = entry.trade_id;
+                            let (e_edit, e_del) = (entry.clone(), entry.clone());
+                            view! {
+                                <div class=move || format!(
+                                    "flex items-center justify-between text-xs py-0.5 rounded px-1 -mx-1 {}",
+                                    if editing.get() == Some(tid) { "bg-amber-900/30" } else { "" }
+                                )>
+                                    <span class="text-gray-400 font-mono">"✓ " {entry.summary()}</span>
+                                    <div class="flex items-center gap-3 shrink-0 font-sans">
+                                        <button type="button"
+                                            class="text-gray-600 hover:text-blue-400 disabled:opacity-40 transition-colors"
+                                            prop:disabled=move || saving.get()
+                                            title="Load this trade back into the row to change it"
+                                            on:click=move |_| on_edit(e_edit.clone())
+                                        >"edit"</button>
+                                        <button type="button"
+                                            class="text-gray-600 hover:text-red-400 disabled:opacity-40 transition-colors"
+                                            prop:disabled=move || saving.get()
+                                            title="Take this trade back"
+                                            on:click=move |_| on_remove_one(e_del.clone())
+                                        >"✕"</button>
+                                    </div>
+                                </div>
+                            }
                         }).collect_view()}
                     </div>
                 })
