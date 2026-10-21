@@ -964,14 +964,17 @@ fn TradeEntryRow(
                 option_meta.set(cached);
                 return;
             }
+            option_meta.set(Vec::new());
             let tok = auth.token.get().unwrap_or_default();
             spawn_local(async move {
-                match market::fetch_option_meta(&tok, &sym).await {
-                    Ok(meta) => {
-                        store.option_meta.update(|map| { map.insert(sym.clone(), meta.clone()); });
+                let (meta, complete) = market::load_option_meta(&tok, &sym, |meta| {
+                    if entry.symbol.get_untracked().trim().eq_ignore_ascii_case(&sym)
+                        && entry.is_option.get_untracked() {
                         option_meta.set(meta);
                     }
-                    Err(_) => option_meta.set(vec![]),
+                }).await;
+                if complete {
+                    store.option_meta.update(|map| { map.insert(sym.clone(), meta); });
                 }
             });
         } else {

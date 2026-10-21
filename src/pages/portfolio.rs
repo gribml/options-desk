@@ -1450,50 +1450,16 @@ fn use_option_meta(
                 option_meta.set(cached);
                 return;
             }
+            option_meta.set(Vec::new());
             let tok = auth.token.get().unwrap_or_default();
             spawn_local(async move {
-                // Prefer the pipeline-populated chain when it covers this symbol.
-                if let Ok(meta) = market::fetch_option_meta(&tok, &sym).await {
-                    if !meta.is_empty() {
-                        store.option_meta.update(|map| { map.insert(sym.clone(), meta.clone()); });
+                let (meta, complete) = market::load_option_meta(&tok, &sym, |meta| {
+                    if symbol.get_untracked().trim().eq_ignore_ascii_case(&sym) && wanted.get_untracked() {
                         option_meta.set(meta);
-                        return;
                     }
-                }
-
-                // No pipeline data — fall back to the on-demand live chain, which
-                // serves from the 15-min cache or fetches from the market data API
-                // page-by-page. Merge each page into the dropdowns as it arrives.
-                let mut acc: Vec<OptionMetaEntry> = Vec::new();
-                let mut page_token: Option<String> = None;
-                let mut refresh_id: Option<String> = None;
-                let mut complete = false;
-                loop {
-                    match market::fetch_option_chain_live(&tok, &sym, page_token.as_deref(), refresh_id.as_deref()).await {
-                        Ok(page) => {
-                            refresh_id = page.refresh_id.clone();
-                            for e in &page.entries {
-                                acc.push(OptionMetaEntry {
-                                    expiry: e.expiry.clone(),
-                                    option_type: e.option_type.clone(),
-                                    strike: e.strike,
-                                });
-                            }
-                            option_meta.set(acc.clone());
-                            match page.next_page_token {
-                                Some(t) => page_token = Some(t),
-                                None => { complete = true; break; }
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                // Only cache a chain walked all the way to its last page. Caching
-                // a half-fetched one pins the truncated list for the rest of the
-                // session, which is why the strikes on offer could differ between
-                // one load and the next.
+                }).await;
                 if complete {
-                    store.option_meta.update(|map| { map.insert(sym.clone(), acc); });
+                    store.option_meta.update(|map| { map.insert(sym.clone(), meta); });
                 }
             });
         } else {

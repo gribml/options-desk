@@ -587,8 +587,7 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
     let store = use_context::<MarketStore>().expect("MarketStore missing");
 
     // On symbol change: default spot to the latest close, load the option-chain
-    // metadata for the dropdowns (same flow as the portfolio's add form — the
-    // pipeline snapshot first, then the on-demand live chain if the DB has none),
+    // metadata for the dropdowns (pipeline snapshot first, then current chain),
     // and default vol to the ATM implied vol.
     Effect::new(move |_| {
         let sym = combo.symbol.get().trim().to_uppercase();
@@ -596,67 +595,44 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
         // Serve dropdowns from cache immediately if we have it.
         if let Some(cached) = store.option_meta.get_untracked().get(&sym).cloned() {
             combo.meta.set(cached);
+        } else {
+            combo.meta.set(Vec::new());
         }
         let tok = auth.token.get_untracked().unwrap_or_default();
         spawn_local(async move {
             let mut spot = combo.spot.get_untracked().trim().parse::<f64>().unwrap_or(0.0);
             if let Ok(bar) = market::fetch_latest_bar(&tok, &sym).await {
                 spot = bar.close;
-                combo.spot.set(format!("{:.2}", bar.close));
+                if combo.symbol.get_untracked().trim().eq_ignore_ascii_case(&sym) {
+                    combo.spot.set(format!("{:.2}", bar.close));
+                }
             }
 
-            // Stays true on the pipeline path (a single response is whole); only
-            // the paged fallback below can leave it half-fetched.
-            let mut complete = true;
             let meta = if let Some(cached) = store.option_meta.get_untracked().get(&sym).cloned() {
                 cached
             } else {
-                // Prefer the pipeline-populated chain when it covers this symbol.
-                let mut m = market::fetch_option_meta(&tok, &sym).await.unwrap_or_default();
-                if m.is_empty() {
-                    complete = false;
-                    // No pipeline data — fall back to the on-demand live chain
-                    // (15-min cache or page-by-page fetch), merging as it arrives.
-                    let mut acc: Vec<OptionMetaEntry> = Vec::new();
-                    let mut page_token: Option<String> = None;
-                    let mut refresh_id: Option<String> = None;
-                    loop {
-                        match market::fetch_option_chain_live(&tok, &sym, page_token.as_deref(), refresh_id.as_deref()).await {
-                            Ok(page) => {
-                                refresh_id = page.refresh_id.clone();
-                                for e in &page.entries {
-                                    acc.push(OptionMetaEntry {
-                                        expiry: e.expiry.clone(),
-                                        option_type: e.option_type.clone(),
-                                        strike: e.strike,
-                                    });
-                                }
-                                combo.meta.set(acc.clone());
-                                match page.next_page_token {
-                                    Some(t) => page_token = Some(t),
-                                    None => { complete = true; break; }
-                                }
-                            }
-                            Err(_) => break,
-                        }
+                let (m, complete) = market::load_option_meta(&tok, &sym, |meta| {
+                    if combo.symbol.get_untracked().trim().eq_ignore_ascii_case(&sym) {
+                        combo.meta.set(meta);
                     }
-                    m = acc;
-                }
-                // See portfolio.rs: a half-walked chain must not be cached, or the
-                // truncated list sticks for the rest of the session.
+                }).await;
                 if complete {
                     store.option_meta.update(|map| { map.insert(sym.clone(), m.clone()); });
                 }
                 m
             };
-            combo.meta.set(meta.clone());
+            if combo.symbol.get_untracked().trim().eq_ignore_ascii_case(&sym) {
+                combo.meta.set(meta.clone());
+            }
 
             // Default vol to the ATM contract's implied vol.
             if spot > 0.0 {
                 if let Some((exp, ty, strike)) = atm_contract(&meta, spot) {
                     if let Ok(q) = market::fetch_option_quote(&tok, &sym, &exp, ty, strike).await {
                         if let Some(iv) = q.implied_vol {
-                            combo.vol.set(format!("{:.1}", iv * 100.0));
+                            if combo.symbol.get_untracked().trim().eq_ignore_ascii_case(&sym) {
+                                combo.vol.set(format!("{:.1}", iv * 100.0));
+                            }
                         }
                     }
                 }

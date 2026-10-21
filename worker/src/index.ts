@@ -526,6 +526,39 @@ async function handleOptionChainLive(url: URL, env: Env): Promise<Response> {
   const requestedRefresh = url.searchParams.get('refresh_id');
   let refreshId: string;
 
+  // Keep completed cache reads paged as well. Large underlyings can have far
+  // more contracts than fit comfortably in one D1 result or HTTP response.
+  const cachedPage = async (offset: number): Promise<Response> => {
+    const { results } = await env.DB.prepare(`
+      SELECT symbol, underlying, expiration AS expiry, option_type AS type, strike,
+             bid, ask, (bid + ask) / 2.0 AS mid, last_price AS last,
+             implied_volatility AS implied_vol, delta, gamma, theta, vega,
+             NULL AS open_interest, NULL AS volume
+      FROM option_chain_cache
+      WHERE underlying = ?
+      ORDER BY expiration, option_type, strike
+      LIMIT 1001 OFFSET ?
+    `).bind(underlying, offset).all<OptionChainEntry>();
+    const more = results.length > 1000;
+    return jsonResp({
+      entries: results.slice(0, 1000),
+      next_page_token: more ? `cache:${offset + 1000}` : null,
+      cached: true,
+      refresh_id: null,
+    });
+  };
+  if (pageToken?.startsWith('cache:')) {
+    const offset = Number(pageToken.slice(6));
+    if (!Number.isSafeInteger(offset) || offset < 1000 || offset % 1000 !== 0) {
+      return jsonResp({ error: 'Invalid cache page token' }, 400);
+    }
+    const state = await env.DB.prepare(`
+      SELECT status FROM option_chain_refresh WHERE underlying = ?
+    `).bind(underlying).first<{ status: string }>();
+    if (state?.status !== 'ready') return jsonResp({ error: 'Cached chain changed; restart' }, 409);
+    return cachedPage(offset);
+  }
+
   // Only a completed generation can be served as a cached chain. An atomic D1
   // lease allows just one request to start a refresh for each underlying.
   if (!pageToken) {
@@ -533,16 +566,7 @@ async function handleOptionChainLive(url: URL, env: Env): Promise<Response> {
       SELECT status, fetched_at FROM option_chain_refresh WHERE underlying = ?
     `).bind(underlying).first<{ status: string; fetched_at: string | null }>();
     if (state?.status === 'ready' && state.fetched_at && Date.now() - Date.parse(`${state.fetched_at}Z`) < 15 * 60_000) {
-      const { results } = await env.DB.prepare(`
-        SELECT symbol, underlying, expiration AS expiry, option_type AS type, strike,
-               bid, ask, (bid + ask) / 2.0 AS mid, last_price AS last,
-               implied_volatility AS implied_vol, delta, gamma, theta, vega,
-               NULL AS open_interest, NULL AS volume
-        FROM option_chain_cache
-        WHERE underlying = ?
-        ORDER BY expiration, option_type, strike
-      `).bind(underlying).all<OptionChainEntry>();
-      return jsonResp({ entries: results, next_page_token: null, cached: true, refresh_id: null });
+      return cachedPage(0);
     }
     refreshId = crypto.randomUUID();
     const claim = await env.DB.prepare(`

@@ -198,6 +198,48 @@ pub async fn fetch_option_meta(token: &str, symbol: &str) -> Result<Vec<OptionMe
     }
 }
 
+/// Show the pipeline snapshot promptly, then replace it with the current
+/// on-demand chain as its pages arrive. A nonempty pipeline snapshot is not
+/// proof that it contains every currently listed expiry or strike.
+/// Only a fully walked live chain is safe to keep in the session cache.
+pub async fn load_option_meta(
+    token: &str,
+    symbol: &str,
+    mut on_update: impl FnMut(Vec<OptionMetaEntry>),
+) -> (Vec<OptionMetaEntry>, bool) {
+    let pipeline = fetch_option_meta(token, symbol).await.unwrap_or_default();
+    if !pipeline.is_empty() {
+        on_update(pipeline.clone());
+    }
+
+    let mut live = Vec::new();
+    let mut page_token: Option<String> = None;
+    let mut refresh_id: Option<String> = None;
+    loop {
+        let page = match fetch_option_chain_live(token, symbol, page_token.as_deref(), refresh_id.as_deref()).await {
+            Ok(page) => page,
+            Err(_) => return (if live.is_empty() { pipeline } else { live }, false),
+        };
+        refresh_id = page.refresh_id;
+        live.extend(page.entries.into_iter().map(|e| OptionMetaEntry {
+            expiry: e.expiry,
+            option_type: e.option_type,
+            strike: e.strike,
+        }));
+        if !live.is_empty() {
+            on_update(live.clone());
+        }
+        match page.next_page_token {
+            Some(next) => page_token = Some(next),
+            None => {
+                // An empty completed chain is authoritative too.
+                if live.is_empty() { on_update(Vec::new()); }
+                return (live, true);
+            }
+        }
+    }
+}
+
 // ── Forward volatility ────────────────────────────────────────────────────────
 
 /// Returns forward vol from eval_date to expiry using the SABR variance curve.
