@@ -1,4 +1,3 @@
-use gloo_timers::callback::Timeout;
 use leptos::prelude::*;
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
@@ -487,10 +486,9 @@ fn date_to_unix(d: &str) -> Option<f64> {
     Some(nd.and_hms_opt(0, 0, 0)?.and_utc().timestamp() as f64)
 }
 
-/// Defer a plot call to the next tick so the target div is laid out (uPlot
-/// sizes to `clientWidth`).
+/// The chart bridge coalesces calls into the next animation frame after layout.
 fn defer_plot(id: String, plot: LinePlot) {
-    Timeout::new(0, move || charts::line_plot(&id, &plot)).forget();
+    charts::line_plot(&id, &plot);
 }
 
 #[component]
@@ -562,6 +560,10 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
     let id_rate = format!("cs-rate-{idp}");
     let id_time = format!("cs-time-{idp}");
     let id_hist = format!("cs-hist-{idp}");
+    let cleanup_ids = [id_price.clone(), id_vol.clone(), id_rate.clone(), id_time.clone(), id_hist.clone()];
+    on_cleanup(move || {
+        for id in &cleanup_ids { charts::destroy_plot(id); }
+    });
 
     let legs_parsed = Memo::new(move |_| parse_legs(&combo.legs.get(), today));
     let center = Memo::new(move |_| {
@@ -617,9 +619,11 @@ fn ComboCard(combo: ComboTrack, auth: AuthState, on_remove: impl Fn() + 'static)
                     // (15-min cache or page-by-page fetch), merging as it arrives.
                     let mut acc: Vec<OptionMetaEntry> = Vec::new();
                     let mut page_token: Option<String> = None;
+                    let mut refresh_id: Option<String> = None;
                     loop {
-                        match market::fetch_option_chain_live(&tok, &sym, page_token.as_deref()).await {
+                        match market::fetch_option_chain_live(&tok, &sym, page_token.as_deref(), refresh_id.as_deref()).await {
                             Ok(page) => {
+                                refresh_id = page.refresh_id.clone();
                                 for e in &page.entries {
                                     acc.push(OptionMetaEntry {
                                         expiry: e.expiry.clone(),

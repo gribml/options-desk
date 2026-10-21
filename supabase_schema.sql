@@ -90,3 +90,6 @@ create table if not exists combos (
 alter table combos enable row level security;
 create policy "own combos" on combos
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create index if not exists combos_user_id_created_at_idx
+  on combos (user_id, created_at desc);

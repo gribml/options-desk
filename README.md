@@ -41,6 +41,14 @@ Run the dev server:
 trunk serve
 ```
 
+Generate the app CSS before running Trunk locally, and again after changing
+Tailwind classes:
+
+```bash
+npm ci
+npm run build:css
+```
+
 Open `http://localhost:8090`.
 
 ## Supabase setup

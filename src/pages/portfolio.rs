@@ -385,31 +385,35 @@ pub fn PortfolioPage() -> impl IntoView {
         let generation = tax_gen.get_untracked() + 1;
         tax_gen.set(generation);
 
-        spawn_local(async move {
-            let batch = market::estimate_portfolio_tax(&token, tax_year, items).await;
-            // Superseded while in flight — drop it rather than clobber newer marks.
+        // Marks and IVs often settle in a burst. Wait for the burst before
+        // issuing the request, so superseded calculations never reach the Worker.
+        gloo_timers::callback::Timeout::new(250, move || {
             if tax_gen.get_untracked() != generation { return; }
-            match batch {
-                Ok(batch) => {
-                    let mut map = HashMap::new();
-                    let mut total = None;
-                    for r in batch.results {
-                        if r.id == TOTAL_TAX_ID {
-                            total = Some(r.tax);
-                        } else if let Ok(uid) = r.id.parse::<Uuid>() {
-                            map.insert(uid, r.tax);
+            spawn_local(async move {
+                let batch = market::estimate_portfolio_tax(&token, tax_year, items).await;
+                if tax_gen.get_untracked() != generation { return; }
+                match batch {
+                    Ok(batch) => {
+                        let mut map = HashMap::new();
+                        let mut total = None;
+                        for r in batch.results {
+                            if r.id == TOTAL_TAX_ID {
+                                total = Some(r.tax);
+                            } else if let Ok(uid) = r.id.parse::<Uuid>() {
+                                map.insert(uid, r.tax);
+                            }
                         }
+                        implied_tax.set(map);
+                        total_tax.set(total);
+                        total_tax_err.set(None);
                     }
-                    implied_tax.set(map);
-                    total_tax.set(total);
-                    total_tax_err.set(None);
+                    Err(e) => {
+                        total_tax.set(None);
+                        total_tax_err.set(Some(e));
+                    }
                 }
-                Err(e) => {
-                    total_tax.set(None);
-                    total_tax_err.set(Some(e));
-                }
-            }
-        });
+            });
+        }).forget();
     });
 
     // Refresh live quotes + option prices on demand.
@@ -1462,10 +1466,12 @@ fn use_option_meta(
                 // page-by-page. Merge each page into the dropdowns as it arrives.
                 let mut acc: Vec<OptionMetaEntry> = Vec::new();
                 let mut page_token: Option<String> = None;
+                let mut refresh_id: Option<String> = None;
                 let mut complete = false;
                 loop {
-                    match market::fetch_option_chain_live(&tok, &sym, page_token.as_deref()).await {
+                    match market::fetch_option_chain_live(&tok, &sym, page_token.as_deref(), refresh_id.as_deref()).await {
                         Ok(page) => {
+                            refresh_id = page.refresh_id.clone();
                             for e in &page.entries {
                                 acc.push(OptionMetaEntry {
                                     expiry: e.expiry.clone(),

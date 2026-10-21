@@ -7,6 +7,7 @@ import {
   MIN_TAX_YEAR,
   type TaxInputs,
 } from './tax';
+import { verifyToken } from './auth';
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -74,6 +75,9 @@ function jsonResp(data: unknown, status = 200): Response {
 function withCors(response: Response, cors: Record<string, string>): Response {
   const headers = new Headers(response.headers);
   for (const [k, v] of Object.entries(cors)) headers.set(k, v);
+  // All browser requests carry credentials. Shared market caching happens only
+  // inside the Worker after authentication, never in a downstream HTTP cache.
+  headers.set('Cache-Control', 'private, no-store');
   return new Response(response.body, { status: response.status, headers });
 }
 
@@ -114,42 +118,23 @@ async function fetchAlpaca(endpoint: string, env: Env): Promise<Response> {
   }
 }
 
-interface SupabaseUser {
-  id: string;
-  email?: string;
-}
-
-// Verifies the Supabase JWT by calling /auth/v1/user, which also returns the
-// user record — so callers get the authenticated user_id for free. Returns null
-// when the token is missing or invalid.
-async function verifyToken(request: Request, env: Env): Promise<SupabaseUser | null> {
-  const auth = request.headers.get('Authorization');
-  if (!auth?.startsWith('Bearer ')) return null;
-  const resp = await fetch(`${supabaseBase(env)}/auth/v1/user`, {
-    headers: { apikey: env.SUPABASE_ANON_KEY, Authorization: auth },
-  });
-  if (!resp.ok) return null;
-  return await resp.json<SupabaseUser>();
-}
-
 // ── Route handlers ────────────────────────────────────────────────────────────
 
 // GET /quote?symbol=AAPL
 // Returns the latest price and day-over-day change from bars_1min.
 async function handleQuote(symbol: string, env: Env): Promise<Response> {
-  const { results } = await env.DB.prepare(`
-    SELECT date(timestamp) AS day, close
-    FROM bars_1min
-    WHERE symbol = ?
-      AND timestamp IN (SELECT MAX(timestamp) FROM bars_1min WHERE symbol = ? GROUP BY date(timestamp))
-    ORDER BY day DESC
-    LIMIT 2
-  `).bind(symbol, symbol).all<{ day: string; close: number }>();
-
-  if (!results.length) return jsonResp({ error: `No data for ${symbol}` }, 404);
-
-  const price = results[0].close;
-  const prevClose = results[1]?.close ?? price;
+  const latest = await env.DB.prepare(`
+    SELECT timestamp, close FROM bars_1min WHERE symbol = ?
+    ORDER BY timestamp DESC LIMIT 1
+  `).bind(symbol).first<{ timestamp: string; close: number }>();
+  if (!latest) return jsonResp({ error: `No data for ${symbol}` }, 404);
+  const day = latest.timestamp.slice(0, 10);
+  const previous = await env.DB.prepare(`
+    SELECT close FROM bars_1min WHERE symbol = ? AND timestamp < ?
+    ORDER BY timestamp DESC LIMIT 1
+  `).bind(symbol, day).first<{ close: number }>();
+  const price = latest.close;
+  const prevClose = previous?.close ?? price;
   const change = price - prevClose;
   const change_pct = prevClose !== 0 ? (change / prevClose) * 100 : 0;
 
@@ -275,18 +260,44 @@ async function handleClosePrices(url: URL, env: Env): Promise<Response> {
   const symbol = url.searchParams.get('symbol')?.toUpperCase();
   if (!symbol) return jsonResp({ error: 'symbol required' }, 400);
 
-  const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '31') || 31, 500);
+  const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') ?? '31') || 31, 500));
 
+  const latest = await env.DB.prepare(`
+    SELECT timestamp, close FROM bars_1min WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1
+  `).bind(symbol).first<{ timestamp: string; close: number }>();
+  if (!latest) return jsonResp([]);
+  const day = latest.timestamp.slice(0, 10);
+  const initialized = await env.DB.prepare(`
+    SELECT 1 AS ok FROM daily_closes_state WHERE symbol = ?
+  `).bind(symbol).first<{ ok: number }>();
+  if (!initialized) {
+    // Pay the historical grouping cost once per symbol, then use indexed daily
+    // rows on every subsequent request. The cron keeps recent rows current.
+    await env.DB.prepare(`
+      INSERT INTO daily_closes (symbol, day, close)
+      SELECT ?, date(timestamp), close FROM bars_1min
+      WHERE symbol = ? AND timestamp IN (
+        SELECT MAX(timestamp) FROM bars_1min WHERE symbol = ? GROUP BY date(timestamp)
+      )
+      ORDER BY timestamp DESC LIMIT 500
+      ON CONFLICT(symbol, day) DO UPDATE SET close = excluded.close
+    `).bind(symbol, symbol, symbol).run();
+    await env.DB.prepare(`
+      INSERT OR REPLACE INTO daily_closes_state (symbol, backfilled_at)
+      VALUES (?, datetime('now'))
+    `).bind(symbol).run();
+  }
+  if (limit === 1) return jsonResp([latest.close]);
+  const previous = await env.DB.prepare(`
+    SELECT timestamp, close FROM bars_1min WHERE symbol = ? AND timestamp < ?
+    ORDER BY timestamp DESC LIMIT 1
+  `).bind(symbol, day).first<{ timestamp: string; close: number }>();
+  if (!previous) return jsonResp([latest.close]);
   const { results } = await env.DB.prepare(`
-    SELECT close
-    FROM bars_1min
-    WHERE symbol = ?
-      AND timestamp IN (SELECT MAX(timestamp) FROM bars_1min WHERE symbol = ? GROUP BY date(timestamp))
-    ORDER BY date(timestamp) DESC
-    LIMIT ?
-  `).bind(symbol, symbol, limit).all<{ close: number }>();
-
-  return jsonResp(results.map(r => r.close));
+    SELECT close FROM daily_closes WHERE symbol = ? AND day < ?
+    ORDER BY day DESC LIMIT ?
+  `).bind(symbol, previous.timestamp.slice(0, 10), limit - 2).all<{ close: number }>();
+  return jsonResp([latest.close, previous.close, ...results.map(r => r.close)]);
 }
 
 // ── Forward volatility ────────────────────────────────────────────────────────
@@ -454,6 +465,31 @@ async function handleLatestBar(url: URL, env: Env): Promise<Response> {
   });
 }
 
+// One auth check and one browser request for a portfolio's stock marks. Keep
+// upstream concurrency bounded so many simultaneous portfolios do not flood
+// Alpaca when their 15-minute cache expires together.
+async function handleLatestBars(url: URL, env: Env): Promise<Response> {
+  const symbols = [...new Set((url.searchParams.get('symbols') ?? '').split(',').map(s => s.trim().toUpperCase()))]
+    .filter(Boolean);
+  if (!symbols.length || symbols.length > 40 || symbols.some(s => !/^[A-Z0-9.]{1,32}$/.test(s))) {
+    return jsonResp({ error: 'Provide 1 to 40 valid symbols' }, 400);
+  }
+  const results: Array<unknown> = new Array(symbols.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(6, symbols.length) }, async () => {
+    while (next < symbols.length) {
+      const index = next++;
+      try {
+        const response = await handleLatestBar(new URL(`https://local/latest-bar?symbol=${encodeURIComponent(symbols[index])}`), env);
+        if (response.ok) results[index] = await response.json();
+      } catch (error) {
+        console.error('Latest bar failed:', symbols[index], error);
+      }
+    }
+  }));
+  return jsonResp(results.filter(Boolean));
+}
+
 // ── On-demand option chain ──────────────────────────────────────────────────────
 
 // Parses an OCC option symbol from the right (the suffix is fixed-width, the root
@@ -485,18 +521,18 @@ interface AlpacaSnapshot {
 // Alpaca paginated fetch, upserting each page into the cache as it goes.
 async function handleOptionChainLive(url: URL, env: Env): Promise<Response> {
   const underlying = url.searchParams.get('symbol')?.toUpperCase();
-  if (!underlying) return jsonResp({ error: 'symbol required' }, 400);
+  if (!underlying || !/^[A-Z0-9.]{1,32}$/.test(underlying)) return jsonResp({ error: 'valid symbol required' }, 400);
   const pageToken = url.searchParams.get('page_token');
+  const requestedRefresh = url.searchParams.get('refresh_id');
+  let refreshId: string;
 
-  // First page: serve from cache if fresh, else purge stale rows and refetch.
+  // Only a completed generation can be served as a cached chain. An atomic D1
+  // lease allows just one request to start a refresh for each underlying.
   if (!pageToken) {
-    const fresh = await env.DB.prepare(`
-      SELECT 1 AS ok FROM option_chain_cache
-      WHERE underlying = ? AND fetched_at >= datetime('now', '-15 minutes')
-      LIMIT 1
-    `).bind(underlying).first<{ ok: number }>();
-
-    if (fresh) {
+    const state = await env.DB.prepare(`
+      SELECT status, fetched_at FROM option_chain_refresh WHERE underlying = ?
+    `).bind(underlying).first<{ status: string; fetched_at: string | null }>();
+    if (state?.status === 'ready' && state.fetched_at && Date.now() - Date.parse(`${state.fetched_at}Z`) < 15 * 60_000) {
       const { results } = await env.DB.prepare(`
         SELECT symbol, underlying, expiration AS expiry, option_type AS type, strike,
                bid, ask, (bid + ask) / 2.0 AS mid, last_price AS last,
@@ -506,70 +542,119 @@ async function handleOptionChainLive(url: URL, env: Env): Promise<Response> {
         WHERE underlying = ?
         ORDER BY expiration, option_type, strike
       `).bind(underlying).all<OptionChainEntry>();
-      return jsonResp({ entries: results, next_page_token: null, cached: true });
+      return jsonResp({ entries: results, next_page_token: null, cached: true, refresh_id: null });
     }
-
+    refreshId = crypto.randomUUID();
+    const claim = await env.DB.prepare(`
+      INSERT INTO option_chain_refresh (underlying, refresh_id, status, lease_until)
+      VALUES (?, ?, 'loading', datetime('now', '+2 minutes'))
+      ON CONFLICT(underlying) DO UPDATE SET
+        refresh_id = excluded.refresh_id, status = 'loading',
+        fetched_at = NULL, lease_until = excluded.lease_until
+      WHERE (option_chain_refresh.status = 'ready'
+             AND (option_chain_refresh.fetched_at IS NULL
+                  OR option_chain_refresh.fetched_at < datetime('now', '-15 minutes')))
+         OR (option_chain_refresh.status = 'loading'
+             AND option_chain_refresh.lease_until < datetime('now'))
+    `).bind(underlying, refreshId).run();
+    if (!claim.meta.changes) return jsonResp({ error: 'Chain refresh in progress' }, 503);
     await env.DB.prepare(`
-      DELETE FROM option_chain_cache
-      WHERE underlying = ? AND fetched_at < datetime('now', '-15 minutes')
+      DELETE FROM option_chain_cache WHERE underlying = ?
     `).bind(underlying).run();
+  } else {
+    // Older browser bundles do not send refresh_id. Let them finish the active
+    // chain while the new Worker and frontend versions roll out independently.
+    const active = requestedRefresh ? null : await env.DB.prepare(`
+      SELECT refresh_id FROM option_chain_refresh
+      WHERE underlying = ? AND status = 'loading'
+    `).bind(underlying).first<{ refresh_id: string }>();
+    refreshId = requestedRefresh ?? active?.refresh_id ?? '';
+    if (!refreshId) return jsonResp({ error: 'No active chain refresh' }, 409);
+    const lease = await env.DB.prepare(`
+      UPDATE option_chain_refresh SET lease_until = datetime('now', '+2 minutes')
+      WHERE underlying = ? AND refresh_id = ? AND status = 'loading'
+        AND lease_until >= datetime('now')
+    `).bind(underlying, refreshId).run();
+    if (!lease.meta.changes) return jsonResp({ error: 'Chain refresh expired; restart' }, 409);
   }
 
   // Fetch one Alpaca page.
   let endpoint = `v1beta1/options/snapshots/${encodeURIComponent(underlying)}?feed=indicative&limit=1000`;
   if (pageToken) endpoint += `&page_token=${encodeURIComponent(pageToken)}`;
 
-  const alpacaResp = await fetchAlpaca(endpoint, env);
-  if (!alpacaResp.ok) {
-    console.error(`Market data upstream error (${alpacaResp.status}):`, await alpacaResp.text());
-    return jsonResp({ error: 'Market data API error' }, alpacaResp.status);
+  const abandon = async () => {
+    await env.DB.prepare(`
+      UPDATE option_chain_refresh SET lease_until = datetime('now', '-1 second')
+      WHERE underlying = ? AND refresh_id = ? AND status = 'loading'
+    `).bind(underlying, refreshId).run();
+  };
+  try {
+    const alpacaResp = await fetchAlpaca(endpoint, env);
+    if (!alpacaResp.ok) {
+      console.error(`Market data upstream error (${alpacaResp.status}):`, await alpacaResp.text());
+      await abandon();
+      return jsonResp({ error: 'Market data API error' }, alpacaResp.status);
+    }
+
+    const data = await alpacaResp.json<{ snapshots?: Record<string, AlpacaSnapshot>; next_page_token: string | null }>();
+    const snapshots = data.snapshots ?? {};
+
+    const insert = env.DB.prepare(`
+      INSERT OR REPLACE INTO option_chain_cache
+        (symbol, underlying, fetched_at, expiration, option_type, strike,
+         bid, ask, last_price, implied_volatility, delta, gamma, theta, vega, rho)
+      VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const entries: OptionChainEntry[] = [];
+    const stmts = [];
+    for (const [occ, snap] of Object.entries(snapshots)) {
+      const parsed = parseOcc(occ);
+      if (!parsed) continue;
+      const bid = snap.latestQuote?.bp ?? 0;
+      const ask = snap.latestQuote?.ap ?? 0;
+      const mid = bid && ask ? (bid + ask) / 2 : (bid || ask || 0);
+      const last = snap.latestTrade?.p ?? null;
+      const iv = snap.impliedVolatility ?? null;
+      const g = snap.greeks ?? {};
+
+      entries.push({
+        symbol: occ, underlying, expiry: parsed.expiry, type: parsed.type, strike: parsed.strike,
+        bid, ask, mid, last, implied_vol: iv,
+        delta: g.delta ?? null, gamma: g.gamma ?? null, theta: g.theta ?? null, vega: g.vega ?? null,
+        open_interest: null, volume: null,
+      });
+      stmts.push(insert.bind(
+        occ, underlying, parsed.expiry, parsed.type, parsed.strike,
+        bid, ask, last, iv, g.delta ?? null, g.gamma ?? null, g.theta ?? null, g.vega ?? null, g.rho ?? null,
+      ));
+    }
+    if (stmts.length) await env.DB.batch(stmts);
+
+    if (!data.next_page_token) {
+      await env.DB.prepare(`
+        UPDATE option_chain_refresh
+        SET status = 'ready', fetched_at = datetime('now'), lease_until = NULL
+        WHERE underlying = ? AND refresh_id = ? AND status = 'loading'
+      `).bind(underlying, refreshId).run();
+    }
+
+    entries.sort((a, b) =>
+      a.expiry.localeCompare(b.expiry) || a.type.localeCompare(b.type) || a.strike - b.strike);
+
+    return jsonResp({ entries, next_page_token: data.next_page_token ?? null, cached: false, refresh_id: refreshId });
+  } catch (error) {
+    await abandon();
+    throw error;
   }
-
-  const data = await alpacaResp.json<{ snapshots?: Record<string, AlpacaSnapshot>; next_page_token: string | null }>();
-  const snapshots = data.snapshots ?? {};
-
-  const insert = env.DB.prepare(`
-    INSERT OR REPLACE INTO option_chain_cache
-      (symbol, underlying, fetched_at, expiration, option_type, strike,
-       bid, ask, last_price, implied_volatility, delta, gamma, theta, vega, rho)
-    VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const entries: OptionChainEntry[] = [];
-  const stmts = [];
-  for (const [occ, snap] of Object.entries(snapshots)) {
-    const parsed = parseOcc(occ);
-    if (!parsed) continue;
-    const bid = snap.latestQuote?.bp ?? 0;
-    const ask = snap.latestQuote?.ap ?? 0;
-    const mid = bid && ask ? (bid + ask) / 2 : (bid || ask || 0);
-    const last = snap.latestTrade?.p ?? null;
-    const iv = snap.impliedVolatility ?? null;
-    const g = snap.greeks ?? {};
-
-    entries.push({
-      symbol: occ, underlying, expiry: parsed.expiry, type: parsed.type, strike: parsed.strike,
-      bid, ask, mid, last, implied_vol: iv,
-      delta: g.delta ?? null, gamma: g.gamma ?? null, theta: g.theta ?? null, vega: g.vega ?? null,
-      open_interest: null, volume: null,
-    });
-    stmts.push(insert.bind(
-      occ, underlying, parsed.expiry, parsed.type, parsed.strike,
-      bid, ask, last, iv, g.delta ?? null, g.gamma ?? null, g.theta ?? null, g.vega ?? null, g.rho ?? null,
-    ));
-  }
-  if (stmts.length) await env.DB.batch(stmts);
-
-  entries.sort((a, b) =>
-    a.expiry.localeCompare(b.expiry) || a.type.localeCompare(b.type) || a.strike - b.strike);
-
-  return jsonResp({ entries, next_page_token: data.next_page_token ?? null, cached: false });
 }
 
 // Batch size cap. Each item costs two full tax computations; this bounds the CPU
 // a single request can consume (see the cpu_ms limit in wrangler.toml) and is far
 // above any plausible portfolio.
 const MAX_TAX_ITEMS = 500;
+const TAX_BASELINE_TTL_MS = 5_000;
+const taxBaselines = new Map<string, { expires: number; baseline: TaxInputs }>();
 
 // POST /tax — compute marginal federal tax for a trade (or batch of positions)
 // against the authenticated user's stored income profile for the given year.
@@ -583,7 +668,7 @@ const MAX_TAX_ITEMS = 500;
 // to the tax of liquidating everything at once.
 async function handleTax(
   request: Request,
-  user: SupabaseUser,
+  user: { id: string },
   authHeader: string,
   env: Env,
 ): Promise<Response> {
@@ -607,31 +692,33 @@ async function handleTax(
     );
   }
 
-  // Read the user's profile for this year (RLS-scoped via the user's own JWT).
-  const profileUrl =
-    `${supabaseBase(env)}/rest/v1/tax_profiles?user_id=eq.${user.id}` +
-    `&tax_year=eq.${taxYear}&select=payload`;
-  const resp = await fetch(profileUrl, {
-    headers: { apikey: env.SUPABASE_ANON_KEY, Authorization: authHeader },
-  });
-  if (!resp.ok) return jsonResp({ error: 'Failed to read tax profile' }, 502);
-
-  const rows = await resp.json<Array<{ payload: { revisions?: unknown[]; trade_gains?: unknown } }>>();
-  const revisions = rows[0]?.payload?.revisions;
-  if (!revisions || revisions.length === 0) {
-    return jsonResp({ error: `No tax profile for ${taxYear}` }, 422);
+  const cacheKey = `${user.id}:${taxYear}`;
+  const cachedBaseline = taxBaselines.get(cacheKey);
+  let baseline = cachedBaseline && cachedBaseline.expires > Date.now()
+    ? cachedBaseline.baseline : undefined;
+  if (!baseline) {
+    // RLS-scoped read. Short per-isolate reuse absorbs bursts of mark changes;
+    // profile edits become visible after at most five seconds.
+    const profileUrl =
+      `${supabaseBase(env)}/rest/v1/tax_profiles?user_id=eq.${user.id}` +
+      `&tax_year=eq.${taxYear}&select=payload`;
+    const resp = await fetch(profileUrl, {
+      headers: { apikey: env.SUPABASE_ANON_KEY, Authorization: authHeader },
+    });
+    if (!resp.ok) return jsonResp({ error: 'Failed to read tax profile' }, 502);
+    const rows = await resp.json<Array<{ payload: { revisions?: unknown[]; trade_gains?: unknown } }>>();
+    const revisions = rows[0]?.payload?.revisions;
+    if (!revisions || revisions.length === 0) {
+      return jsonResp({ error: `No tax profile for ${taxYear}` }, 422);
+    }
+    const typed = sanitizeTaxInputs(revisions[revisions.length - 1]);
+    if (!typed) {
+      return jsonResp({ error: `Tax profile for ${taxYear} is incomplete or invalid` }, 422);
+    }
+    baseline = withTradeGains(typed, rows[0]?.payload?.trade_gains);
+    if (taxBaselines.size >= 100) taxBaselines.delete(taxBaselines.keys().next().value!);
+    taxBaselines.set(cacheKey, { expires: Date.now() + TAX_BASELINE_TTL_MS, baseline });
   }
-  // A malformed stored revision (unknown filing status, non-numeric amount)
-  // would otherwise throw on an undefined bracket table or return NaN, which
-  // serializes to null and fails to deserialize on the client.
-  const typed: TaxInputs | null = sanitizeTaxInputs(revisions[revisions.length - 1]);
-  if (!typed) {
-    return jsonResp({ error: `Tax profile for ${taxYear} is incomplete or invalid` }, 422);
-  }
-  // Gains already realised by trades logged in the portfolio belong in the
-  // baseline too — a marginal estimate is only right against everything else
-  // booked that year.
-  const baseline = withTradeGains(typed, rows[0]?.payload?.trade_gains);
 
   const constantsYear = constantsFor(taxYear).year;
   const baselineTax = computeFederalTax(baseline, taxYear);
@@ -668,7 +755,20 @@ async function handleTax(
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    // One rolling daily aggregation replaces a scan of minute history on each
+    // request. The pipeline can also write this table as new bars arrive.
+    await env.DB.prepare(`
+      INSERT INTO daily_closes (symbol, day, close)
+      SELECT symbol, day, close FROM (
+        SELECT symbol, date(timestamp) AS day, close,
+               ROW_NUMBER() OVER (PARTITION BY symbol, date(timestamp) ORDER BY timestamp DESC) AS rank
+        FROM bars_1min WHERE timestamp >= datetime('now', '-7 days')
+      ) WHERE rank = 1
+      ON CONFLICT(symbol, day) DO UPDATE SET close = excluded.close
+    `).run();
+  },
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const origin = request.headers.get('Origin') ?? '';
     const allowed = [env.ALLOWED_ORIGIN, env.DEV_ORIGIN].filter(Boolean) as string[];
     const originOk = allowed.length > 0 && allowed.includes(origin);
@@ -694,6 +794,29 @@ export default {
       // workers.dev domain (where paths are served at the root).
       const path = url.pathname.replace(/^\/v1(?=\/|$)/, '') || '/';
 
+      // These routes contain market data shared by every user. Cache only
+      // after authentication, with a token-free key and route-specific TTL.
+      const marketTtl: Record<string, number> = {
+        '/quote': 60, '/close-prices': 300, '/latest-bar': 60,
+        '/option-quote': 60,
+        '/option-chain': 900, '/option-meta': 900, '/option-history': 300,
+        '/forward-vol': 300, '/term-rates': 300,
+      };
+      const ttl = request.method === 'GET' ? marketTtl[path] : undefined;
+      let cacheKey: Request | undefined;
+      if (ttl) {
+        const cacheUrl = new URL(request.url);
+        cacheUrl.pathname = path;
+        for (const key of ['symbol', 'underlying']) {
+          const value = cacheUrl.searchParams.get(key);
+          if (value) cacheUrl.searchParams.set(key, value.toUpperCase());
+        }
+        cacheUrl.searchParams.sort();
+        cacheKey = new Request(cacheUrl.toString());
+        const hit = await caches.default.match(cacheKey);
+        if (hit) return withCors(hit, cors);
+      }
+
       const response = await (async (): Promise<Response> => {
         if (path === '/quote' && request.method === 'GET') {
           const symbol = url.searchParams.get('symbol')?.toUpperCase();
@@ -710,11 +833,18 @@ export default {
         if (path === '/forward-vol' && request.method === 'GET') return handleForwardVol(url, env);
         if (path === '/term-rates' && request.method === 'GET') return handleTermRates(url, env);
         if (path === '/latest-bar' && request.method === 'GET') return handleLatestBar(url, env);
+        if (path === '/latest-bars' && request.method === 'GET') return handleLatestBars(url, env);
         if (path === '/tax' && request.method === 'POST') return handleTax(request, user, authHeader, env);
-        if (path === '/ai/discuss')
-
         return jsonResp({ error: 'Not found' }, 404);
       })();
+
+      if (ttl && cacheKey && response.ok) {
+        const cached = new Response(response.clone().body, {
+          status: response.status,
+          headers: { ...Object.fromEntries(response.headers), 'Cache-Control': `public, max-age=${ttl}` },
+        });
+        ctx.waitUntil(caches.default.put(cacheKey, cached));
+      }
 
       return withCors(response, cors);
     } catch (e) {

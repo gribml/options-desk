@@ -33,6 +33,9 @@ cpu_ms = 50
 ALLOWED_ORIGIN = "https://martingale.cc"
 DEV_ORIGIN = "https://options-desk-7c0.pages.dev"
 
+[triggers]
+crons = ["0 2 * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "PLACEHOLDER_D1_DATABASE_NAME"

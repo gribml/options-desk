@@ -2,6 +2,7 @@
 /dist
 .env
 worker/node_modules
+node_modules
 worker/.dev.vars
 worker/wrangler.local.toml
 worker/.wrangler/

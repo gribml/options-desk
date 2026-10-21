@@ -4,31 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Martingale</title>
-    <!-- Tailwind CSS CDN (swap for proper build pipeline before public deploy) -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-      tailwind.config = {
-        theme: {
-          extend: {
-            colors: {
-              surface: "#0f1117",
-              panel: "#1a1d27",
-              border: "#2a2d3a",
-            },
-            fontFamily: {
-              mono: ["'JetBrains Mono'", "monospace"],
-            },
-          },
-        },
-      };
-    </script>
+    <link data-trunk rel="css" href="styles/app.css" />
     <link
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
     <!-- uPlot: lightweight canvas charts for the Combos tab (~15KB gzip) -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css" />
-    <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.32/dist/uPlot.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.32/dist/uPlot.iife.min.js"></script>
     <style>
       /* Match uPlot chrome to the dark theme */
       .u-title { color: #cbd5e1; font-size: 0.8rem; font-weight: 500; }

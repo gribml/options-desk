@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS option_chain (
 CREATE INDEX IF NOT EXISTS idx_bars_symbol_ts
     ON bars_1min (symbol, timestamp DESC);
 
+CREATE INDEX IF NOT EXISTS idx_bars_timestamp
+    ON bars_1min (timestamp DESC);
+
 CREATE INDEX IF NOT EXISTS idx_chain_underlying_snapshot
     ON option_chain (underlying, snapshot_date DESC);
 
@@ -114,3 +117,26 @@ CREATE TABLE IF NOT EXISTS option_chain_cache (
 
 CREATE INDEX IF NOT EXISTS idx_chain_cache_underlying_fetched
     ON option_chain_cache (underlying, fetched_at DESC);
+
+-- A chain is visible as cached only after its last Alpaca page is committed.
+-- The lease prevents simultaneous requests from rebuilding the same symbol.
+CREATE TABLE IF NOT EXISTS option_chain_refresh (
+    underlying TEXT PRIMARY KEY,
+    refresh_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('loading', 'ready')),
+    fetched_at TEXT,
+    lease_until TEXT
+);
+
+-- Materialized by the ingestion pipeline from the last minute bar of each day.
+CREATE TABLE IF NOT EXISTS daily_closes (
+    symbol TEXT NOT NULL,
+    day TEXT NOT NULL,
+    close REAL NOT NULL,
+    PRIMARY KEY (symbol, day)
+);
+
+CREATE TABLE IF NOT EXISTS daily_closes_state (
+    symbol TEXT PRIMARY KEY,
+    backfilled_at TEXT NOT NULL
+);

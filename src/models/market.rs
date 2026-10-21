@@ -141,6 +141,8 @@ pub struct OptionChainPage {
     pub entries: Vec<OptionChainEntry>,
     pub next_page_token: Option<String>,
     #[serde(default)]
+    pub refresh_id: Option<String>,
+    #[serde(default)]
     pub cached: bool,
 }
 

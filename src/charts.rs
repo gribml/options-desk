@@ -1,7 +1,6 @@
 //! Thin interop over uPlot (loaded from CDN in `index.html`) for the 2D line
-//! charts on the Combos tab. Charts are keyed by their container element id;
-//! re-plotting the same id destroys and recreates the instance, so Leptos
-//! effects can just call `line_plot` whenever their inputs change.
+//! charts on the Combos tab. Charts are keyed by their container element id
+//! and updated in place when their data changes.
 
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -29,6 +28,7 @@ pub struct LinePlot {
 
 #[wasm_bindgen(inline_js = r#"
 const __otPlots = {};
+const __otPending = {};
 
 // Dollar amount for an axis tick: full cents up to $10K, then $12.5K / $1.25M
 // style — the same abbreviation the rest of the app uses on narrow screens.
@@ -75,12 +75,17 @@ function __otAxisSize(u, values, axisIdx, cycleNum) {
 }
 
 export function otDestroyPlot(divId) {
+  if (__otPending[divId]) { cancelAnimationFrame(__otPending[divId].frame); delete __otPending[divId]; }
   const inst = __otPlots[divId];
-  if (inst) { inst.destroy(); delete __otPlots[divId]; }
+  if (inst) { inst.plot.destroy(); delete __otPlots[divId]; }
 }
 
-// Floating tooltip that snaps to the (single) series and shows just its value.
-function __otTooltip(fmtY) {
+const __otDate = new Intl.DateTimeFormat('en-US', {
+  year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC',
+});
+
+// Floating tooltip showing the snapped x value and its (single) series value.
+function __otTooltip(fmtX, fmtY, xLabel, isTime) {
   let el;
   return {
     hooks: {
@@ -94,28 +99,40 @@ function __otTooltip(fmtY) {
       },
       setCursor: u => {
         const idx = u.cursor.idx;
+        const x = idx == null ? null : u.data[0][idx];
         const y = idx == null ? null : u.data[1][idx];
-        if (y == null) { el.style.display = 'none'; return; }
+        if (x == null || y == null) { el.style.display = 'none'; return; }
         el.style.display = '';
-        el.style.left = u.valToPos(u.data[0][idx], 'x') + 'px';
+        el.style.left = u.valToPos(x, 'x') + 'px';
         el.style.top = u.valToPos(y, 'y') + 'px';
-        el.textContent = fmtY ? fmtY(u, [y])[0] : String(y);
+        const xText = isTime ? __otDate.format(new Date(x * 1000))
+          : fmtX ? fmtX(u, [x])[0] : String(x);
+        const yText = fmtY ? fmtY(u, [y])[0] : String(y);
+        el.textContent = `${xLabel}: ${xText}  ·  ${yText}`;
       },
     },
   };
 }
 
-export function otLinePlot(divId, payloadJson) {
+function __otRenderPlot(divId, payloadJson) {
   const el = document.getElementById(divId);
   if (!el || !window.uPlot) return;
   const p = JSON.parse(payloadJson);
-  otDestroyPlot(divId);
-
   const isTime = p.x_fmt === 'time';
   const data = [p.x, ...p.series.map(s => s.y)];
+  const signature = JSON.stringify([p.title, p.x_label, p.x_fmt, p.y_fmt, p.series.map(s => [s.label, s.color])]);
+  const existing = __otPlots[divId];
+  if (existing && existing.signature === signature && existing.plot.root.parentElement === el) {
+    existing.plot.setData(data);
+    const width = el.clientWidth || 320;
+    if (existing.plot.width !== width) existing.plot.setSize({ width, height: 240 });
+    return;
+  }
+  if (existing) { existing.plot.destroy(); delete __otPlots[divId]; }
   const grid = { stroke: '#2a2d3a', width: 1 };
 
   const fmtX = isTime ? null : __otFmt(p.x_fmt);
+  const fmtXFull = isTime ? null : __otFmt(p.x_fmt, true);
   const fmtY = __otFmt(p.y_fmt);
   const fmtYFull = __otFmt(p.y_fmt, true);
 
@@ -134,9 +151,23 @@ export function otLinePlot(divId, payloadJson) {
       ...p.series.map(s => ({ label: s.label, stroke: s.color, width: 2, points: { show: false } })),
     ],
     legend: { show: false },
-    plugins: [__otTooltip(fmtYFull)],
+    plugins: [__otTooltip(fmtXFull, fmtYFull, p.x_label, isTime)],
   };
-  __otPlots[divId] = new window.uPlot(opts, data, el);
+  __otPlots[divId] = { plot: new window.uPlot(opts, data, el), signature };
+}
+
+export function otLinePlot(divId, payloadJson) {
+  const pending = __otPending[divId];
+  if (pending) {
+    pending.payload = payloadJson;
+    return;
+  }
+  const item = { payload: payloadJson, frame: 0 };
+  item.frame = requestAnimationFrame(() => {
+    delete __otPending[divId];
+    __otRenderPlot(divId, item.payload);
+  });
+  __otPending[divId] = item;
 }
 "#)]
 extern "C" {

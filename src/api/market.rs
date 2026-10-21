@@ -42,9 +42,27 @@ pub async fn fetch_latest_bar(token: &str, symbol: &str) -> Result<LatestBar, St
 
 pub async fn fetch_latest_bars(token: &str, symbols: &[String]) -> Vec<LatestBar> {
     let mut out = Vec::new();
-    for sym in symbols {
-        if let Ok(b) = fetch_latest_bar(token, sym).await {
-            out.push(b);
+    for chunk in symbols.chunks(40) {
+        let joined = chunk.iter().map(|s| String::from(js_sys::encode_uri_component(s))).collect::<Vec<_>>().join(",");
+        let url = format!("{}/latest-bars?symbols={joined}", worker_base());
+        let mut batched = false;
+        if let Ok(resp) = Request::get(&url)
+            .header("Authorization", &format!("Bearer {}", token))
+            .send().await
+        {
+            if resp.ok() {
+                if let Ok(mut bars) = resp.json::<Vec<LatestBar>>().await {
+                    out.append(&mut bars);
+                    batched = true;
+                }
+            }
+        }
+        if !batched {
+            // During a staggered frontend/Worker deploy, keep the old route
+            // working until the batch endpoint is available everywhere.
+            for sym in chunk {
+                if let Ok(bar) = fetch_latest_bar(token, sym).await { out.push(bar); }
+            }
         }
     }
     out
@@ -104,24 +122,32 @@ pub async fn fetch_option_chain_live(
     token: &str,
     symbol: &str,
     page_token: Option<&str>,
+    refresh_id: Option<&str>,
 ) -> Result<OptionChainPage, String> {
     let mut url = format!("{}/option-chain-live?symbol={}", worker_base(), symbol);
     if let Some(pt) = page_token {
         let encoded = String::from(js_sys::encode_uri_component(pt));
         url.push_str(&format!("&page_token={}", encoded));
     }
-    let resp = Request::get(&url)
-        .header("Authorization", &format!("Bearer {}", token))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if resp.ok() {
-        resp.json::<OptionChainPage>().await.map_err(|e| e.to_string())
-    } else {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        Err(body["error"].as_str().unwrap_or("Option chain fetch failed").to_string())
+    if let Some(id) = refresh_id {
+        url.push_str("&refresh_id=");
+        url.push_str(&String::from(js_sys::encode_uri_component(id)));
     }
+    for retry in 0..60 {
+        let resp = Request::get(&url)
+            .header("Authorization", &format!("Bearer {}", token))
+            .send().await.map_err(|e| e.to_string())?;
+        if resp.ok() {
+            return resp.json::<OptionChainPage>().await.map_err(|e| e.to_string());
+        }
+        if resp.status() == 503 && page_token.is_none() && retry < 59 {
+            gloo_timers::future::TimeoutFuture::new(1000).await;
+            continue;
+        }
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        return Err(body["error"].as_str().unwrap_or("Option chain fetch failed").to_string());
+    }
+    Err("Option chain refresh timed out".to_string())
 }
 
 // ── Option history (per-contract price/IV time series) ───────────────────────
