@@ -19,8 +19,10 @@
 //                       e.g. "203.0.113.7, 2001:db8::1234". Find your public IP
 //                       with  curl https://api.ipify.org  /  curl https://api64.ipify.org
 //
-// Access "Bypass" policies don't issue a token, so an IP that should skip the
-// login belongs in ALLOWED_IPS, not in a Bypass rule.
+// Access sits in front of this middleware on any hostname it covers, so an IP
+// that should skip the login needs two entries: an Access "Bypass" policy for
+// it (gets the request past Access, but with no token) and ALLOWED_IPS (gets
+// the token-less request past this middleware).
 //
 // Fail-closed: with ALLOWED_IPS unset and either Access variable unset, ALL
 // requests get 404.
