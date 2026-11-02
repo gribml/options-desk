@@ -1,22 +1,22 @@
-// Dev-only access gate. Requires a valid Cloudflare Access token
-// (Cf-Access-Jwt-Assertion).
-// Everyone else gets a 404, so the site appears not to exist (no banner, no
-// login page, nothing to probe). Runs on every request (see dist/_routes.json)
-// and on every hostname the Pages project answers on — martingale.cc, the
-// <project>.pages.dev alias, and preview deployments alike. Each hostname
-// needs an Access application to issue a token; otherwise it gets a 404.
+// Dev-only access gate. Cloudflare Access protects martingale.cc before this
+// middleware runs, including its Allow and Bypass policies. Pages aliases and
+// previews need a valid Cloudflare Access token (Cf-Access-Jwt-Assertion).
+// Other requests get a 404. Runs on every request (see dist/_routes.json).
 //
 // Pages environment variables / secrets:
 //   ACCESS_TEAM_DOMAIN  Zero Trust team domain, e.g. "yourteam.cloudflareaccess.com"
 //   ACCESS_AUD          Application Audience (AUD) tag of the Access application.
 //                       Comma-separate several to accept more than one app
 //                       (e.g. a separate one covering preview deployments).
-// Fail-closed: if either Access variable is unset, all requests get 404.
+// Fail-closed on Pages aliases: if either Access variable is unset, requests
+// there get 404. Keep the martingale.cc Access application enabled.
 //
 // To lift the lockdown: delete this file and landing/_routes.json (and drop the
 // `cp landing/_routes.json dist/_routes.json` line from the deploy workflow),
 // then redeploy.
 export async function onRequest(ctx) {
+  if (new URL(ctx.request.url).hostname === "martingale.cc") return ctx.next();
+
   const team = (ctx.env.ACCESS_TEAM_DOMAIN || "")
     .trim()
     .replace(/^https?:\/\//, "")
