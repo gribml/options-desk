@@ -66,6 +66,12 @@ Open `http://localhost:8090`.
 4. Output directory: `dist`
 5. Add `SUPABASE_URL` and `SUPABASE_ANON_KEY` as environment variables
 
+The Pages access gate also requires `ACCESS_TEAM_DOMAIN` (your Zero Trust team
+domain) and `ACCESS_AUD` (the Access application audience tag) as Pages environment
+variables. Put every hostname you use, including preview domains, behind a
+Cloudflare Access application with a matching audience tag. Requests without a
+valid Access token receive a 404. The former `ALLOWED_IPS` variable is ignored.
+
 First build takes ~10 minutes (compiling Rust); subsequent builds are faster.
 
 ## Pricing model

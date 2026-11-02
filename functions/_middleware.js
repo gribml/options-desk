@@ -1,40 +1,22 @@
-// Dev-only access gate.
-//
-// Lets a request through if EITHER
-//   - it carries a valid Cloudflare Access token (Cf-Access-Jwt-Assertion), or
-//   - its client IP is on the ALLOWED_IPS list.
+// Dev-only access gate. Requires a valid Cloudflare Access token
+// (Cf-Access-Jwt-Assertion).
 // Everyone else gets a 404, so the site appears not to exist (no banner, no
 // login page, nothing to probe). Runs on every request (see dist/_routes.json)
 // and on every hostname the Pages project answers on — martingale.cc, the
-// <project>.pages.dev alias, and preview deployments alike. A hostname that
-// isn't behind an Access application never gets a token, so it 404s unless the
-// client IP is allowlisted.
+// <project>.pages.dev alias, and preview deployments alike. Each hostname
+// needs an Access application to issue a token; otherwise it gets a 404.
 //
 // Pages environment variables / secrets:
 //   ACCESS_TEAM_DOMAIN  Zero Trust team domain, e.g. "yourteam.cloudflareaccess.com"
 //   ACCESS_AUD          Application Audience (AUD) tag of the Access application.
 //                       Comma-separate several to accept more than one app
 //                       (e.g. a separate one covering preview deployments).
-//   ALLOWED_IPS         Optional comma-separated client IPs that skip the login,
-//                       e.g. "203.0.113.7, 2001:db8::1234". Find your public IP
-//                       with  curl https://api.ipify.org  /  curl https://api64.ipify.org
-//
-// Access sits in front of this middleware on any hostname it covers, so an IP
-// that should skip the login needs two entries: an Access "Bypass" policy for
-// it (gets the request past Access, but with no token) and ALLOWED_IPS (gets
-// the token-less request past this middleware).
-//
-// Fail-closed: with ALLOWED_IPS unset and either Access variable unset, ALL
-// requests get 404.
+// Fail-closed: if either Access variable is unset, all requests get 404.
 //
 // To lift the lockdown: delete this file and landing/_routes.json (and drop the
 // `cp landing/_routes.json dist/_routes.json` line from the deploy workflow),
 // then redeploy.
 export async function onRequest(ctx) {
-  const allowedIps = list(ctx.env.ALLOWED_IPS);
-  const ip = ctx.request.headers.get("CF-Connecting-IP") || "";
-  if (ip && allowedIps.includes(ip)) return ctx.next();
-
   const team = (ctx.env.ACCESS_TEAM_DOMAIN || "")
     .trim()
     .replace(/^https?:\/\//, "")
