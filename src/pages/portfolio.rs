@@ -168,6 +168,18 @@ fn summarize(positions: &[Position], metrics: &[Option<PositionMetrics>]) -> Por
 #[component]
 pub fn PortfolioPage() -> impl IntoView {
     let auth = use_context::<AuthState>().expect("AuthState missing");
+    let hide_closed = RwSignal::new(false);
+    Effect::new(move |_| {
+        if let (Some(token), Some(user_id)) = (auth.token.get(), auth.user_id.get()) {
+            spawn_local(async move {
+                if let Ok(settings) = supabase::fetch_user_settings(&token, &user_id).await {
+                    if auth.user_id.get_untracked().as_ref() == Some(&user_id) {
+                        hide_closed.set(settings.hide_closed_positions);
+                    }
+                }
+            });
+        }
+    });
     let store = use_context::<MarketStore>().expect("MarketStore missing");
     let positions = RwSignal::new(Vec::<Position>::new());
     let loading = RwSignal::new(true);
@@ -566,10 +578,21 @@ pub fn PortfolioPage() -> impl IntoView {
                 </EmptyState>
             })}
 
+            {move || {
+                let ps = positions.get();
+                (hide_closed.get() && !ps.is_empty() && ps.iter().all(|p| p.effective_quantity() == 0))
+                    .then(|| view! {
+                        <p class="text-sm text-gray-500 font-sans">
+                            "All positions are closed and hidden. Show them again in Settings."
+                        </p>
+                    })
+            }}
+
             <div class="space-y-2">
                 {move || {
                     positions.get().into_iter()
                         .zip(metrics.get().into_iter())
+                        .filter(|(p, _)| !hide_closed.get() || p.effective_quantity() != 0)
                         .map(|(p, m)| {
                             let id = p.id;
                             view! {

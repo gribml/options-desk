@@ -27,6 +27,9 @@ pub fn Nav() -> impl IntoView {
                             <NavLink href="/app/tax" title="Your income, so tax estimates are real numbers">
                                 "Taxes"
                             </NavLink>
+                            <NavLink href="/app/settings" title="Your display preferences">
+                                "Settings"
+                            </NavLink>
                         </div>
                     </Show>
                 </div>

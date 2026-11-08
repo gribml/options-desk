@@ -9,6 +9,7 @@ mod models;
 mod pages;
 mod pricing;
 mod store;
+mod settings;
 
 use app::App;
 

@@ -394,3 +394,20 @@ pub async fn sync_trade_gains(
     }
     Ok(profiles)
 }
+
+// One settings row per authenticated user; ownership is enforced by RLS.
+pub async fn fetch_user_settings(token: &str, user_id: &str) -> Result<crate::settings::UserSettings, String> {
+    let url = format!("{}?user_id=eq.{}&select=hide_closed_positions", rest_url("user_settings"), user_id);
+    let resp = authed_get(&url, token).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() { return Err(format!("Load settings failed: {}", resp.status())); }
+    let rows: Vec<crate::settings::UserSettings> = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().next().unwrap_or_default())
+}
+
+pub async fn save_user_settings(token: &str, user_id: &str, hide: bool) -> Result<(), String> {
+    let body = serde_json::json!({ "user_id": user_id, "hide_closed_positions": hide });
+    let resp = authed_post(&format!("{}?on_conflict=user_id", rest_url("user_settings")), token)
+        .header("Prefer", "resolution=merge-duplicates,return=minimal")
+        .json(&body).map_err(|e| e.to_string())?.send().await.map_err(|e| e.to_string())?;
+    if resp.ok() { Ok(()) } else { Err(format!("Save settings failed: {}", resp.status())) }
+}

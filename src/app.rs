@@ -12,7 +12,7 @@ use crate::components::nav::Nav;
 use crate::store::MarketStore;
 use crate::pages::{
     import::ImportPage, login::LoginPage, portfolio::PortfolioPage, pricer::PricerPage,
-    scenarios::ScenariosPage, tax::TaxPage,
+    scenarios::ScenariosPage, settings::SettingsPage, tax::TaxPage,
 };
 
 const REFRESH_INTERVAL_MS: u32 = 45 * 60 * 1000; // 45 minutes
@@ -119,6 +119,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/import") view=move || view! { <Protected><ImportPage /></Protected> } />
                     <Route path=path!("/scenarios") view=move || view! { <Protected><ScenariosPage /></Protected> } />
                     <Route path=path!("/tax") view=move || view! { <Protected><TaxPage /></Protected> } />
+                    <Route path=path!("/settings") view=move || view! { <Protected><SettingsPage /></Protected> } />
                 </Routes>
             </main>
         </Router>
