@@ -125,9 +125,11 @@ pub fn TaxPage() -> impl IntoView {
             {move || loading.get().then(|| view! { <p class="text-sm text-gray-400">"Loading…"</p> })}
             {move || fetch_err.get().map(|e| view! { <p class="text-sm text-red-400">{e}</p> })}
 
-            {move || {
-                years().into_iter().map(|year| {
-                    let existing = profiles.get().into_iter().find(|p| p.tax_year == year);
+            // Keep each year's form mounted when a save updates profiles.
+            // Wait for the initial fetch so forms are seeded with stored data.
+            <Show when=move || !loading.get()>
+                <For each=years key=|year| *year children=move |year| {
+                    let existing = profiles.get_untracked().into_iter().find(|p| p.tax_year == year);
                     let default_expanded = year == current_year;
                     let year_lots = Signal::derive(move || {
                         lots.get().into_iter().filter(|l| l.year() == year as i32).collect::<Vec<_>>()
@@ -150,8 +152,8 @@ pub fn TaxPage() -> impl IntoView {
                             }
                         />
                     }
-                }).collect_view()
-            }}
+                } />
+            </Show>
         </div>
     }
 }
